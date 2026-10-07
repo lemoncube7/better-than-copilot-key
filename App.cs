@@ -7,6 +7,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Windows.Forms;
+using System.Threading.Tasks;
 
 static class App
 {
@@ -22,17 +23,26 @@ static class App
     {
         try
         {
+            if(args.Length==4&&args[0]=="--apply-update"){Updates.Install(args);return;}
+            if(args.Length==2&&args[0]=="--update-test"){Updates.SelfTest(args[1]);return;}
+            if(args.Length==2&&args[0]=="--update-check")
+            {ReleaseInfo release=Updates.Check();File.WriteAllText(args[1],"Current="+Updates.VersionLabel+" Latest="+release.Tag+" Digest="+release.Package.Digest);return;}
+            if(args.Length==2&&args[0]=="--update-install-test")
+            {ReleaseInfo release=Updates.Check();if(release.Version<=Updates.Current)throw new InvalidOperationException("Newer release required");string temp=Updates.Download(release);Updates.LaunchInstaller(temp);File.WriteAllText(args[1],"Installer ready; target="+release.Tag);return;}
             try { SetProcessDpiAwarenessContext(new IntPtr(-4)); } catch (EntryPointNotFoundException) { }
             Application.SetCompatibleTextRenderingDefault(false);
             Application.EnableVisualStyles();
             SettingsWindow window = new SettingsWindow();
             int test = Array.IndexOf(args, "--ui-test");
             if (test >= 0) window.VerifyOnShown(args[test + 1]);
+            else window.CheckUpdatesOnShown();
             Application.Run(window);
         }
         catch (Exception e)
         {
             Environment.ExitCode = 1;
+            if(args.Length==2&&(args[0]=="--update-test"||args[0]=="--update-check"||args[0]=="--update-install-test"))
+            {File.WriteAllText(args[1]+".error.txt",e.ToString());return;}
             MessageBox.Show(e.Message, "차라리 이거", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
@@ -43,6 +53,9 @@ sealed class SettingsWindow : Form
     ChoiceControl fire;
     readonly FlowLayoutPanel controls = new FlowLayoutPanel();
     readonly Label status = new Label();
+    readonly Label updateStatus = new Label();
+    Button checkUpdate,installUpdate;
+    ReleaseInfo availableUpdate;
     EffectSettings settings;
     bool initializing;
     readonly Color bg = Color.FromArgb(22, 25, 34), panel = Color.FromArgb(32, 37, 49), fg = Color.FromArgb(230, 234, 244);
@@ -53,11 +66,12 @@ sealed class SettingsWindow : Form
         StartPosition = FormStartPosition.CenterScreen; BackColor = bg; ForeColor = fg;
         Font = new Font("맑은 고딕", 10); AutoScaleMode = AutoScaleMode.Dpi;
         try { settings = EffectSettings.Load(); } catch (Exception e) { settings = new EffectSettings(); status.Text = "설정을 읽지 못해 기본값을 표시합니다: " + e.Message; }
-        TableLayoutPanel root = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(26), ColumnCount = 1, RowCount = 8 };
+        TableLayoutPanel root = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(26), ColumnCount = 1, RowCount = 9 };
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 48)); root.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 60)); root.RowStyles.Add(new RowStyle(SizeType.Absolute, 55));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); root.RowStyles.Add(new RowStyle(SizeType.Absolute, 65));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 55)); root.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 80));
         root.Controls.Add(new Label { Text = "버튼 하나, 잠깐의 즐거움", Font = new Font(Font.FontFamily, 20, FontStyle.Bold), Dock = DockStyle.Fill }, 0, 0);
         root.Controls.Add(new Label { Text = "Copilot 대신, 심심할 때 만지작. 효과를 고르고 조정하세요.", Dock = DockStyle.Fill, ForeColor = Color.LightSteelBlue }, 0, 1);
         ConfigureCombo(effect, new string[] { "색종이 폭죽", "커서 중력장", "별가루 클러스터", "블랙홀 · hold", "진자 · 놓으면 발사", "십자가 섬광 · hold", "레일건 · 휠 충전", "주사위 · 흔들어서 굴리기" });
@@ -77,6 +91,17 @@ sealed class SettingsWindow : Form
         Button reset = Button("기본값 복원", panel);
         buttons.Controls.Add(preview); buttons.Controls.Add(save); buttons.Controls.Add(reset); root.Controls.Add(buttons, 0, 6);
         status.Dock = DockStyle.Fill; status.ForeColor = Color.LightSteelBlue; root.Controls.Add(status, 0, 7);
+        FlowLayoutPanel updateRow = new FlowLayoutPanel {Dock=DockStyle.Fill,WrapContents=true};
+        checkUpdate=Button("새 버전 확인",panel);installUpdate=Button("업데이트",Color.FromArgb(43,100,129));installUpdate.Enabled=false;
+        updateStatus.Text="현재 v"+Updates.VersionLabel;updateStatus.Width=550;updateStatus.Height=28;updateStatus.ForeColor=Color.LightSteelBlue;
+        updateRow.Controls.Add(checkUpdate);updateRow.Controls.Add(installUpdate);updateRow.Controls.Add(updateStatus);root.Controls.Add(updateRow,0,8);
+        checkUpdate.Click+=async delegate {await CheckUpdates();};
+        installUpdate.Click+=async delegate {
+            if(availableUpdate==null)return;
+            installUpdate.Enabled=checkUpdate.Enabled=false;updateStatus.Text="다운로드 및 검증 중…";
+            try {string temp=await Task.Run(delegate{return Updates.Download(availableUpdate);});updateStatus.Text="설정을 보존하며 업데이트 중…";await Task.Run(delegate{Updates.LaunchInstaller(temp);});Application.Exit();}
+            catch(Exception e){updateStatus.Text="업데이트 실패: "+e.Message;checkUpdate.Enabled=installUpdate.Enabled=true;}
+        };
         Controls.Add(root);
         BuildEffectControls();
         effect.SelectedIndexChanged += delegate { settings.Effect = new string[] { "confetti", "gravity", "cluster", "blackhole", "pendulum", "crossflash", "railgun", "dice" }[effect.SelectedIndex]; BuildEffectControls(); status.Text = "변경 후 저장하면 Copilot 키에 적용됩니다."; };
@@ -85,6 +110,16 @@ sealed class SettingsWindow : Form
         save.Click += delegate { try { EffectSettings.Save(settings); status.Text = "저장했습니다. 다음 Copilot 키 실행부터 적용됩니다."; } catch (Exception e) { status.Text = "저장 실패: " + e.Message; } };
         reset.Click += delegate { settings = new EffectSettings(); initializing = true; effect.SelectedIndex = 2; palette.SelectedIndex = 0; initializing = false; BuildEffectControls(); status.Text = "기본값으로 복원했습니다. 저장하면 적용됩니다."; };
         if (status.Text == "") status.Text = "미리보기로 시험한 뒤 저장하세요.";
+    }
+    public void CheckUpdatesOnShown(){Shown+=async delegate {await CheckUpdates();};}
+    async Task CheckUpdates()
+    {
+        checkUpdate.Enabled=installUpdate.Enabled=false;availableUpdate=null;updateStatus.Text="현재 v"+Updates.VersionLabel+" · 새 버전 확인 중…";
+        try {ReleaseInfo release=await Task.Run(delegate{return Updates.Check();});
+            if(release.Version>Updates.Current){availableUpdate=release;installUpdate.Enabled=true;updateStatus.Text="현재 v"+Updates.VersionLabel+" → "+release.Tag+" · 업데이트 가능";}
+            else updateStatus.Text="현재 v"+Updates.VersionLabel+" · 최신 버전입니다.";
+        }catch(Exception e){updateStatus.Text="확인 실패 · 다시 시도할 수 있습니다: "+e.Message;}
+        finally{checkUpdate.Enabled=true;}
     }
     void ConfigureCombo(ChoiceControl box, string[] items)
     {

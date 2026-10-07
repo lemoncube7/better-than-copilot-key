@@ -33,6 +33,10 @@
 
 ## 설정
 
+설정 앱을 열면 최신 정식 버전을 비동기로 확인합니다. **새 버전 확인**으로 다시 조회하고, 새 버전이 있으면 **업데이트** 버튼으로 다운로드·검증·교체합니다. 설정 앱은 자동으로 다시 열리며 `settings.json`은 보존됩니다. Copilot 효과 실행에서는 네트워크를 사용하지 않습니다.
+
+업데이트는 이 저장소의 GitHub Release ZIP만 받으며 SHA-256과 실행 파일 버전을 확인합니다. 다운로드나 교체가 실패하면 기존 버전을 유지합니다. 최초 v0.1.0에는 업데이트 기능이 없으므로 v0.1.1을 한 번 받아야 합니다.
+
 `settings.json`은 실행 파일 옆에 생성됩니다. 미리보기와 저장은 분리되어 있습니다. 파일이 없다면 기본값을 사용합니다. `settings.example.json`에는 기본 설정만 담았습니다.
 
 ![설정 화면](settings.png)
@@ -49,6 +53,10 @@ Windows x64, .NET Framework 4.x, Visual Studio 또는 Build Tools의 **C++ 데�
 
 ## 개발 검증
 
+태그 `v0.1.2`처럼 `v숫자.숫자.숫자`를 push하면 GitHub Actions가 Windows에서 빌드·네이티브 자체 검사·업데이트 복구 검사를 수행하고 ZIP과 SHA256.txt를 Releases에 올립니다. GitHub의 Release 화면에서 태그를 생성해 게시하는 경우에도 작동합니다. Actions의 **Windows build and release → Run workflow**에서 버전 번호를 입력해 배포할 수도 있습니다.
+
+소스 커밋과 push는 개발자가 직접 합니다. 로컬 파일을 감시하거나 자동으로 소스를 올리지는 않습니다.
+
 ```powershell
 .\copilot_key.exe --selftest --verify selftest.log
 .\"차라리 이거.exe" --ui-test ui-check
@@ -62,6 +70,10 @@ UI 테스트는 실행 폴더의 설정을 변경하므로 개인 설정이 없�
 - `App.cs`: 효과 선택 및 설정 UI
 - `Settings.cs`: 설정 스키마, 기본값, 저장
 - `build.ps1`: Windows 빌드
+- `Update.cs`: 버전 확인, 다운로드 검증, 설정을 보존하는 실행 파일 교체
+- `VERSION`: 로컬 빌드 기본 버전. 배포 빌드는 태그 버전을 사용
+- `package.ps1`: 빌드·검사·배포 ZIP 생성
+- `.github/workflows/release.yml`: 자동 빌드·배포
 - `settings.example.json`: 공개 기본 설정
 
 라이선스는 아직 지정하지 않았습니다.
