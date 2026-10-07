@@ -1,0 +1,47 @@
+name: Windows build and release
+on:
+  push:
+    tags: ['v*']
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version, for example 0.1.1'
+        required: true
+        type: string
+permissions:
+  contents: write
+concurrency:
+  group: release-${{ github.event.release.tag_name || github.ref_name }}
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Resolve version
+        shell: pwsh
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          $tag = if ($env:INPUT_VERSION) { 'v' + $env:INPUT_VERSION } elseif ($env:RELEASE_TAG) { $env:RELEASE_TAG } else { $env:GITHUB_REF_NAME }
+          if ($tag -notmatch '^v\d+\.\d+\.\d+$') { throw 'Use a tag such as v0.1.1.' }
+          "RELEASE_TAG=$tag" >> $env:GITHUB_ENV
+          "RELEASE_VERSION=$($tag.Substring(1))" >> $env:GITHUB_ENV
+      - name: Build, test and package
+        shell: pwsh
+        run: ./package.ps1 -VersionText $env:RELEASE_VERSION
+      - name: Publish Windows package
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title "차라리 이거 $env:RELEASE_TAG" --notes 'Windows ZIP을 받아 압축을 풀고 차라리 이거.exe를 실행하세요. 자세한 사용법과 업데이트 안내는 README를 참고하세요.'
+            if ($LASTEXITCODE -ne 0) { throw 'Release creation failed.' }
+          }
+          gh release upload $env:RELEASE_TAG better-than-copilot-key-windows-x64.zip SHA256.txt --repo $env:GITHUB_REPOSITORY --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Release upload failed.' }
