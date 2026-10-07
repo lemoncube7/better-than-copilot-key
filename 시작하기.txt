@@ -1,0 +1,12 @@
+차라리 이거 · Windows x64
+
+차라리 이거.exe에서 효과를 고르고 저장하세요.
+PowerToys Keyboard Manager의 앱 열기 경로에 copilot_key.exe를 연결하세요.
+이미 실행 중인 경우: 아무것도 하지 않기
+인수·시작 디렉터리: 비움 / 실행 계정·창 표시: 보통
+
+레일건: Copilot hold → 휠 클릭으로 추가 설치 → 휠로 공동 충전 → 놓으면 동시 발사
+주사위: hold 중 마우스 흔들기 → 멈추면 한 면으로 정렬 → 놓으면 결과 표시 후 종료
+Esc: 전체 취소. hold 중이라면 키를 놓을 때 종료.
+
+소스 및 전체 설명: https://github.com/lemoncube7/better-than-copilot-key
