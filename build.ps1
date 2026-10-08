@@ -11,9 +11,10 @@ if (!$installation) { throw 'MSVC C++ tools are required to build the native eff
 $outputDirectory = $PSScriptRoot
 $versionFile = Join-Path $env:TEMP ('toy-version-' + [guid]::NewGuid().ToString('N') + '.cs')
 [IO.File]::WriteAllText($versionFile, ('[assembly: System.Reflection.AssemblyVersion("' + $VersionText + '.0")]'), (New-Object Text.UTF8Encoding($false)))
-& $compilerPath /nologo /target:winexe /optimize+ "/out:$outputDirectory\차라리 이거.exe" /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.Runtime.Serialization.dll /reference:System.IO.Compression.dll /reference:System.IO.Compression.FileSystem.dll $versionFile (Join-Path $PSScriptRoot 'Settings.cs') (Join-Path $PSScriptRoot 'App.cs') (Join-Path $PSScriptRoot 'Update.cs')
+& $compilerPath /nologo /target:winexe /optimize+ "/out:$outputDirectory\이게 코파일럿보다 낫다.exe" /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.Runtime.Serialization.dll /reference:System.IO.Compression.dll /reference:System.IO.Compression.FileSystem.dll $versionFile (Join-Path $PSScriptRoot 'Settings.cs') (Join-Path $PSScriptRoot 'App.cs') (Join-Path $PSScriptRoot 'Update.cs')
 Remove-Item -LiteralPath $versionFile -ErrorAction SilentlyContinue
 if ($LASTEXITCODE -ne 0) { throw 'Settings app build failed. Close the app before rebuilding.' }
+Copy-Item -LiteralPath (Join-Path $outputDirectory '이게 코파일럿보다 낫다.exe') -Destination (Join-Path $outputDirectory '차라리 이거.exe') -Force
 $environmentScript = Join-Path $installation 'VC\Auxiliary\Build\vcvars64.bat'
 $taskId = [Guid]::NewGuid().ToString('N')
 $nativeBatch = Join-Path $env:TEMP ('mountain-build-' + $taskId + '.cmd')

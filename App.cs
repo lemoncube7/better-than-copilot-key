@@ -43,7 +43,7 @@ static class App
             Environment.ExitCode = 1;
             if(args.Length==2&&(args[0]=="--update-test"||args[0]=="--update-check"||args[0]=="--update-install-test"))
             {File.WriteAllText(args[1]+".error.txt",e.ToString());return;}
-            MessageBox.Show(e.Message, "차라리 이거", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            MessageBox.Show(e.Message, "이게 코파일럿보다 낫다", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
 }
@@ -62,7 +62,7 @@ sealed class SettingsWindow : Form
     public SettingsWindow()
     {
         int height = Math.Max(480, Math.Min(1120, Screen.FromPoint(Cursor.Position).WorkingArea.Height - 80));
-        Text = "차라리 이거 · 효과 설정"; Size = new Size(700, height); MinimumSize = new Size(640, Math.Min(920, height));
+        Text = "이게 코파일럿보다 낫다 · 효과 설정"; Size = new Size(700, height); MinimumSize = new Size(640, Math.Min(920, height));
         StartPosition = FormStartPosition.CenterScreen; BackColor = bg; ForeColor = fg;
         Font = new Font("맑은 고딕", 10); AutoScaleMode = AutoScaleMode.Dpi;
         try { settings = EffectSettings.Load(); } catch (Exception e) { settings = new EffectSettings(); status.Text = "설정을 읽지 못해 기본값을 표시합니다: " + e.Message; }
@@ -74,8 +74,8 @@ sealed class SettingsWindow : Form
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 80));
         root.Controls.Add(new Label { Text = "버튼 하나, 잠깐의 즐거움", Font = new Font(Font.FontFamily, 20, FontStyle.Bold), Dock = DockStyle.Fill }, 0, 0);
         root.Controls.Add(new Label { Text = "Copilot 대신, 심심할 때 만지작. 효과를 고르고 조정하세요.", Dock = DockStyle.Fill, ForeColor = Color.LightSteelBlue }, 0, 1);
-        ConfigureCombo(effect, new string[] { "색종이 폭죽", "커서 중력장", "별가루 클러스터", "블랙홀 · hold", "진자 · 놓으면 발사", "십자가 섬광 · hold", "레일건 · 휠 충전", "주사위 · 흔들어서 굴리기" });
-        effect.SelectedIndex = Array.IndexOf(new string[] { "confetti", "gravity", "cluster", "blackhole", "pendulum", "crossflash", "railgun", "dice" }, settings.Effect);
+        ConfigureCombo(effect, new string[] { "색종이 폭죽", "커서 중력장", "별가루 클러스터", "블랙홀 · hold", "진자 · 놓으면 발사", "십자가 섬광 · hold", "레일건 · 휠 충전", "주사위 · 흔들어서 굴리기", "터치패드 · 별가루", "터치패드 · 그림판" });
+        effect.SelectedIndex = Array.IndexOf(new string[] { "confetti", "gravity", "cluster", "blackhole", "pendulum", "crossflash", "railgun", "dice", "touchpad", "drawing" }, settings.Effect);
         root.Controls.Add(Row("Copilot 키 효과", effect), 0, 2);
         ConfigureCombo(palette, new string[] { "네온", "파스텔", "차가운 별빛", "따뜻한 불꽃" });
         palette.SelectedIndex = Array.IndexOf(new string[] { "neon", "pastel", "ice", "warm" }, settings.Palette);
@@ -104,7 +104,7 @@ sealed class SettingsWindow : Form
         };
         Controls.Add(root);
         BuildEffectControls();
-        effect.SelectedIndexChanged += delegate { settings.Effect = new string[] { "confetti", "gravity", "cluster", "blackhole", "pendulum", "crossflash", "railgun", "dice" }[effect.SelectedIndex]; BuildEffectControls(); status.Text = "변경 후 저장하면 Copilot 키에 적용됩니다."; };
+        effect.SelectedIndexChanged += delegate { settings.Effect = new string[] { "confetti", "gravity", "cluster", "blackhole", "pendulum", "crossflash", "railgun", "dice", "touchpad", "drawing" }[effect.SelectedIndex]; BuildEffectControls(); status.Text = "변경 후 저장하면 Copilot 키에 적용됩니다."; };
         palette.SelectedIndexChanged += delegate { settings.Palette = new string[] { "neon", "pastel", "ice", "warm" }[palette.SelectedIndex]; };
         preview.Click += delegate { try { App.Preview(settings); status.Text = "현재 값으로 미리보기 중 · 저장된 설정은 바뀌지 않습니다."; } catch (Exception e) { status.Text = e.Message; } };
         save.Click += delegate { try { EffectSettings.Save(settings); status.Text = "저장했습니다. 다음 Copilot 키 실행부터 적용됩니다."; } catch (Exception e) { status.Text = "저장 실패: " + e.Message; } };
@@ -181,6 +181,17 @@ sealed class SettingsWindow : Form
             FlightGravity();
             controls.Controls.Add(new Label { Text = "매다는 지점이 커서를 따라옵니다. 흔들어서 가속하세요.\r\n놓으면 커서 이동 속도까지 합쳐서 날아갑니다.", Width = 560, Height = 65, ForeColor = Color.LightSteelBlue });
         }
+        else if (settings.Effect == "drawing")
+        {
+            ChoiceControl surface=new ChoiceControl();ConfigureCombo(surface,new string[]{"화면 위에 그리기","흰 그림판"});
+            surface.SelectedIndex=settings.DrawingSurface=="white"?1:0;controls.Controls.Add(Row("그리는 곳",surface));
+            surface.SelectedIndexChanged+=delegate{settings.DrawingSurface=surface.SelectedIndex==1?"white":"screen";};
+            controls.Controls.Add(new Label { Text = "Copilot을 누르면 그림판이 열립니다.\r\n손가락마다 선을 그립니다. 손가락을 떼면 획이 끊깁니다.\r\n여러 손가락으로 동시에 그릴 수 있습니다.\r\nCopilot을 다시 누르거나 Esc로 닫습니다.\r\n닫으면 그림은 사라집니다. 자동 종료는 없습니다.", Width = 560, Height = 230, ForeColor = Color.LightSteelBlue });
+        }
+        else if (settings.Effect == "touchpad")
+        {
+            controls.Controls.Add(new Label { Text = "손가락마다 빛과 별가루가 나타납니다. 움직이면 궤적이 남습니다.\r\n터치패드 전체를 실행 당시 커서가 있는 모니터에 대응시킵니다.\r\n손을 뗀 뒤 8초 동안 입력이 없으면 종료 · Esc로 취소.\r\n커서 이동·클릭은 그대로 전달됩니다. 현재 노트북의 HID 형식을 사용합니다.", Width = 560, Height = 230, ForeColor = Color.LightSteelBlue });
+        }
         else if (settings.Effect == "dice")
         {
             Number("주사위 크기 (px)", settings.DiceSize, 40, 140, 0, 4, delegate(double v) { settings.DiceSize = v; });
@@ -239,7 +250,7 @@ sealed class SettingsWindow : Form
                 try
                 {
                     Directory.CreateDirectory(directory);
-                    for (int i = 0; i < 8; i++)
+                    for (int i = 0; i < 10; i++)
                     {
                         effect.VerifyMenuSelection(i); PerformLayout(); controls.PerformLayout();
                         using (Bitmap bitmap = new Bitmap(Width, Height)) { DrawToBitmap(bitmap, new Rectangle(0, 0, Width, Height)); bitmap.Save(Path.Combine(directory, "settings-" + i + ".png")); }

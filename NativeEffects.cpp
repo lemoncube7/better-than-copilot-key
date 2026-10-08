@@ -10,6 +10,8 @@
 #include <random>
 #include <stdexcept>
 #include <new>
+#include <cstddef>
+#include "Touchpad.h"
 
 static double clamp(double x, double lo, double hi) { return std::max(lo, std::min(hi, x)); }
 static LARGE_INTEGER epoch, frequency;
@@ -103,6 +105,7 @@ struct Json {
     }
 };
 struct Settings {
+    std::string drawingSurface="screen";
     std::string effect = "cluster", palette = "neon", fire = "instant";
     int confettiCount = 280, gravityCount = 130, clusterCount = 150;
     double confettiLife = 3.4, confettiSpeed = 1, gravityLife = 11, strength = 1, radius = 16, fuse = .9, speed = 1, slingPower = 6;
@@ -123,8 +126,9 @@ struct Settings {
             if (end == i->second.c_str() || *end || !std::isfinite(v)) throw std::runtime_error("Invalid setting value");
             return clamp(v, lo, hi);
         };
+        str("DrawingSurface",s.drawingSurface);if(s.drawingSurface!="white")s.drawingSurface="screen";
         str("Effect", s.effect); str("Palette", s.palette); str("FireMode", s.fire);
-        if (s.effect != "cluster" && s.effect != "gravity" && s.effect != "confetti" && s.effect != "blackhole" && s.effect != "pendulum" && s.effect != "crossflash" && s.effect != "railgun" && s.effect != "dice") s.effect = "cluster";
+        if (s.effect != "cluster" && s.effect != "gravity" && s.effect != "confetti" && s.effect != "blackhole" && s.effect != "pendulum" && s.effect != "crossflash" && s.effect != "railgun" && s.effect != "dice" && s.effect != "touchpad" && s.effect != "drawing") s.effect = "cluster";
         if (s.palette != "neon" && s.palette != "pastel" && s.palette != "ice" && s.palette != "warm") s.palette = "neon";
         if (s.fire != "instant" && s.fire != "left" && s.fire != "middle" && s.fire != "space" && s.fire != "slingshot") s.fire = "instant";
         s.confettiCount = int(num("ConfettiCount", 280, 20, 1200)); s.gravityCount = int(num("GravityCount", 130, 10, 800)); s.clusterCount = int(num("ClusterCount", 150, 20, 1000));
@@ -347,12 +351,15 @@ struct Engine {
     DiceState dice;bool middleCaptured=false;
     std::vector<RailTrace> railTraces;
     bool cancelUntilUp=false;
+    #include "TouchpadDraw.inl"
+    #include "TouchpadEngine.inl"
     Engine() {
         left = GetSystemMetrics(SM_XVIRTUALSCREEN); top = GetSystemMetrics(SM_YVIRTUALSCREEN);
         width = GetSystemMetrics(SM_CXVIRTUALSCREEN); height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
         particles.reserve(4096);
     }
     ~Engine() {
+        freeInk();
         if(keyboardHook)UnhookWindowsHookEx(keyboardHook);
         if(mouseHook)UnhookWindowsHookEx(mouseHook);
         if (buffer) { SelectObject(buffer, oldBitmap); DeleteDC(buffer); }
@@ -383,12 +390,18 @@ struct Engine {
     }
     void trigger(const Settings& s,const POINT* position=NULL) {
         if(cancelUntilUp)return;
+        padReady=false;padContacts.clear();drawing=false;penDown=false;
         double time=now(); POINT cursor;if(position)cursor=*position;else GetCursorPos(&cursor);isArmed=false;sling.ready=false;sling.pulling=false;
         pendulum.ready=false;pendulum.hanging=false;blackHole.ready=false;blackHole.pulling=false;
         cross.ready=false;cross.pulling=false;rail.ready=false;rail.holding=false;extraRails.clear();dice.visible=false;
         for(Particle& p:particles)if(p.kind==3||p.kind==4){p.kind=2;p.born=time;p.life=1.2;}
         log("Trigger="+std::to_string(++triggers)+" Effect="+s.effect+" Window="+std::to_string(reinterpret_cast<UINT_PTR>(window)));
-        if(s.effect=="confetti") {
+        if(s.effect=="touchpad"||s.effect=="drawing") {
+            padSettings=s;padBounds=monitor(cursor.x-left,cursor.y-top);padUntil=time+12;padLastReport=-100;padPackets=0;padEmission=0;
+            RAWINPUTDEVICE device={0x0D,5,RIDEV_INPUTSINK,window};padReady=RegisterRawInputDevices(&device,1,sizeof(device))!=FALSE;
+            log(padReady?"Touchpad=Registered":"Touchpad=RegistrationFailed");
+            if(s.effect=="drawing"){if(!padReady)throw std::runtime_error("Cannot register drawing input");openBoard(padBounds);}
+        } else if(s.effect=="confetti") {
             std::vector<RECT> displays;EnumDisplayMonitors(NULL,NULL,monitors,reinterpret_cast<LPARAM>(&displays));
             for(const RECT& r:displays) for(int i=0;i<s.confettiCount;++i) {
                 bool right=i%2!=0;double angle=-1.57079632679+(random01()-.5)*1.8+(right?-.25:.25),speed=(450+random01()*650)*s.confettiSpeed;
@@ -627,6 +640,7 @@ struct Engine {
             releaseRail(cursor.x-left,cursor.y-top,now());
             if(dice.visible&&dice.holding){dice.holding=false;dice.until=now()+1.5;log("Dice=Release");}
         } else if(fresh) {
+            if(drawing){if(now()-drawOpened>.3)finish("DrawingToggle");return;}
             holdStarted=now();log("Copilot=DOWN EventTick="+std::to_string(eventTime));
             try { Settings next=sling.ready?sling.settings:pendulum.ready?pendulum.settings:blackHole.ready?blackHole.settings:cross.ready?cross.settings:rail.ready?rail.settings:dice.visible?dice.settings:Settings::from(readFile(directory+L"settings.json"));trigger(next,position); }
             catch(const std::exception& error) { log(std::string("SettingsError=")+error.what()); }
@@ -708,6 +722,7 @@ struct Engine {
     }
     void finish(const char* why) {
         if(closing)return;
+        padReady=false;padContacts.clear();drawing=false;penDown=false;
         if(copilotHold.held&&std::string(why)=="Escape") {
             particles.clear();clusters.clear();pending.clear();shocks.clear();collectedBursts.clear();railTraces.clear();extraRails.clear();dice.visible=false;rail.ready=false;rail.holding=false;rail.visibleUntil=-100;isArmed=false;sling.ready=false;sling.pulling=false;pendulum.ready=false;pendulum.hanging=false;blackHole.ready=false;blackHole.pulling=false;cross.ready=false;cross.pulling=false;cross.flashAt=-100;cancelUntilUp=true;
             if(window)ShowWindow(window,SW_HIDE);log("Escape=Cancelled WaitForUp");return;
@@ -726,6 +741,8 @@ struct Engine {
         POINT cursor;GetCursorPos(&cursor);
         if(elapsed>.001) { double blend=1-std::exp(-elapsed/.045);mouseVX+=((cursor.x-previousCursor.x)/elapsed-mouseVX)*blend;mouseVY+=((cursor.y-previousCursor.y)/elapsed-mouseVY)*blend; }
         previousCursor=cursor;double cx=cursor.x-left,cy=cursor.y-top;
+        padStep(time,dt);
+        if(drawing){if(drawDirty){invalidate();drawDirty=false;}return;}
         if(rail.ready){if(rail.holding)rail.aim(cx,cy);else if(time>=rail.until)rail.ready=false;}
         for(auto& gun:extraRails)if(gun.ready&&gun.holding)gun.aim(cx,cy);
         if(dice.visible){bool was=dice.settled;dice.step(cx,cy,dt,time);Bounds b=monitor(cx,cy);dice.x=clamp(dice.x,b.left+110,b.right-110);dice.y=clamp(dice.y,b.top+110,b.bottom-110);if(dice.settled&&!was)log("Dice=Settled");}
@@ -746,15 +763,17 @@ struct Engine {
         for(size_t i=pending.size();i-- >0;) if(time>=pending[i].due) { Pending p=pending[i];pending.erase(pending.begin()+i);launch(p.settings,p.x,p.y,mouseVX,mouseVY,time); }
         physics(time,dt,cx,cy);
         emitCollectedBursts(time);
-        if(particles.empty()&&clusters.empty()&&pending.empty()&&shocks.empty()&&collectedBursts.empty()&&railTraces.empty()&&!isArmed&&!sling.ready&&!pendulum.ready&&!blackHole.ready&&!cross.ready&&!dice.visible&&!rail.ready&&time>=rail.visibleUntil&&!copilotHold.held) { finish("Empty");return; }
+        if(particles.empty()&&clusters.empty()&&pending.empty()&&shocks.empty()&&collectedBursts.empty()&&railTraces.empty()&&!isArmed&&!sling.ready&&!pendulum.ready&&!blackHole.ready&&!cross.ready&&!dice.visible&&!rail.ready&&time>=rail.visibleUntil&&!padReady&&!copilotHold.held) { finish("Empty");return; }
         invalidate();
     }
     void invalidate() {
         RECT bounds={};
+        if(drawing)bounds=board;
         auto include=[&](double x,double y,double vx,double vy) {
             RECT r={LONG(std::floor(std::min(x,x-vx*.06)-20)),LONG(std::floor(std::min(y,y-vy*.06)-20)),LONG(std::ceil(std::max(x,x-vx*.06)+20)),LONG(std::ceil(std::max(y,y-vy*.06)+20))};
             if(IsRectEmpty(&bounds))bounds=r;else UnionRect(&bounds,&bounds,&r);
         };
+        for(const PadContact& c:padContacts)include(padBounds.left+24+c.x*(padBounds.right-padBounds.left-48),padBounds.top+24+c.y*(padBounds.bottom-padBounds.top-48),0,0);
         for(const Particle& p:particles) if(p.x>-150&&p.y>-150&&p.x<width+150&&p.y<height+150)include(p.x,p.y,p.vx,p.vy);
         for(const Cluster& c:clusters)include(c.x,c.y,c.vx,c.vy+(c.settings.gravityEnabled?c.settings.gravity*std::max(0.,now()-c.born):0));
         if(rail.ready||now()<rail.visibleUntil){RECT r={LONG(rail.x-340),LONG(rail.y-340),LONG(rail.x+340),LONG(rail.y+340)};if(IsRectEmpty(&bounds))bounds=r;else UnionRect(&bounds,&bounds,&r);}
@@ -890,6 +909,7 @@ struct Engine {
         PAINTSTRUCT ps;HDC target=BeginPaint(window,&ps);
         HRGN region=CreateRectRgnIndirect(&ps.rcPaint);SelectClipRgn(buffer,region);DeleteObject(region);
         FillRect(buffer,&ps.rcPaint,(HBRUSH)GetStockObject(BLACK_BRUSH));double time=now();
+        if(drawing&&inkDC)BitBlt(buffer,board.left,board.top,board.right-board.left,board.bottom-board.top,inkDC,0,0,SRCCOPY);
         for(const Cluster& c:clusters) {
             if(c.railSlug){double speed=std::max(1.,std::hypot(c.vx,c.vy)),tail=75+c.railEnergy*.75;thickLine(c.x-c.vx/speed*tail,c.y-c.vy/speed*tail,c.x,c.y,fadeColor(c.color,.6),9);thickLine(c.x-c.vx/speed*tail,c.y-c.vy/speed*tail,c.x,c.y,RGB(255,255,255),3);}
             else clusterDraw(c.x,c.y,c.vx,c.vy+(c.settings.gravityEnabled?c.settings.gravity*std::max(0.,time-c.born):0),time-c.born,c.color);
@@ -936,6 +956,9 @@ struct Engine {
             const wchar_t* hint=armed.fire=="middle"?L"가운데 클릭 → 발사":armed.fire=="left"?L"클릭 → 발사":L"Space → 발사";
             SetTextColor(buffer,RGB(176,196,222));TextOutW(buffer,int(x+20),int(y+20),hint,lstrlenW(hint));
         }
+        for(const PadContact& c:padContacts){if(drawing)break;double x=padBounds.left+24+c.x*(padBounds.right-padBounds.left-48),y=padBounds.top+24+c.y*(padBounds.bottom-padBounds.top-48);COLORREF color=colorForFixed(padSettings.palette);
+            SelectObject(buffer,GetStockObject(NULL_BRUSH));SetDCPenColor(buffer,fadeColor(color,.55));Ellipse(buffer,int(x-12),int(y-12),int(x+12),int(y+12));SelectObject(buffer,GetStockObject(DC_BRUSH));star(x,y,8,color);star(x,y,3,RGB(255,255,255));
+        }
         for(const Particle& p:particles) {
             if(p.kind==4)continue;
             if(p.x < -100||p.y < -100||p.x > width+100||p.y > height+100)continue;
@@ -972,7 +995,7 @@ struct Engine {
         if(time-cross.flashAt<.18) {double fade=1-(time-cross.flashAt)/.18;crossDraw(cross.x,cross.y,cross.settings.crossReach*(1+(1-fade)*.5),RGB(255,255,255),fade);}
         BitBlt(target,ps.rcPaint.left,ps.rcPaint.top,ps.rcPaint.right-ps.rcPaint.left,ps.rcPaint.bottom-ps.rcPaint.top,buffer,ps.rcPaint.left,ps.rcPaint.top,SRCCOPY);
         SelectClipRgn(buffer,NULL);EndPaint(window,&ps);
-        if(!firstPaint && (!particles.empty()||!clusters.empty()||isArmed||sling.ready||pendulum.ready||blackHole.ready||cross.ready||rail.ready||dice.visible)) { firstPaint=true;log("FirstPaint"); }
+        if(!firstPaint && (!particles.empty()||!clusters.empty()||isArmed||sling.ready||pendulum.ready||blackHole.ready||cross.ready||rail.ready||dice.visible||drawing)) { firstPaint=true;log("FirstPaint"); }
         if(!snapshotPath.empty()&&!snapshotSaved&&time-started>.35) {
             snapshotSaved=true;BITMAPINFO info={};info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);info.bmiHeader.biWidth=width;info.bmiHeader.biHeight=-height;info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;
             std::vector<BYTE> pixels(size_t(width)*height*4);HGDIOBJ selected=SelectObject(buffer,oldBitmap);HDC screen=GetDC(NULL);
@@ -1024,6 +1047,7 @@ static LRESULT CALLBACK windowProc(HWND window,UINT message,WPARAM w,LPARAM l) {
     if(message==WM_NCCREATE) { auto create=reinterpret_cast<CREATESTRUCTW*>(l);engine=reinterpret_cast<Engine*>(create->lpCreateParams);SetWindowLongPtrW(window,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(engine));engine->window=window; }
     if(!engine)return DefWindowProcW(window,message,w,l);
     switch(message) {
+        case WM_INPUT:engine->padInput(l);return DefWindowProcW(window,message,w,l);
         case RailPlaceMessage:{POINT point={LONG(INT_PTR(w)),LONG(INT_PTR(l))};engine->placeRail(point);return 0;}
         case RailWheelMessage:engine->chargeRail(int(INT_PTR(w)));return 0;
         case CopilotMessage: {
@@ -1050,6 +1074,24 @@ static LRESULT CALLBACK windowProc(HWND window,UINT message,WPARAM w,LPARAM l) {
 }
 static void require(bool condition,const char* why) { if(!condition)throw std::runtime_error(why); }
 static void selfTest() {
+    {Engine draw;draw.padSettings.drawingSurface="white";draw.setupBuffer();draw.openBoard({0,0,1000,700});draw.padReady=true;
+    draw.drawContacts({{0,.2,.2}});POINT firstInk=draw.inkLast;draw.drawContacts({{0,.8,.8}});
+    require(draw.penDown&&GetPixel(draw.inkDC,firstInk.x,firstInk.y)==RGB(38,65,118),"Drawing ink persists on canvas");
+    draw.drawContacts({});require(!draw.penDown,"Drawing lift ends stroke");
+    draw.drawContacts({{0,.3,.3},{1,.5,.5}});require(draw.penDown&&draw.inkHeads.size()==2,"Drawing multiple fingers independently");
+    draw.padStep(100,.016);require(draw.padReady&&draw.drawing,"Drawing does not idle exit");
+    draw.copilotHold.held=true;draw.copilot(false,0);require(!draw.closing,"Drawing repeat does not toggle");
+    draw.copilot(true,0);require(!draw.closing,"Drawing release keeps canvas");
+    draw.drawOpened=-1;draw.copilot(false,0);require(draw.closing&&!draw.drawing,"Drawing second press closes");}
+
+    {Engine overlay;overlay.setupBuffer();overlay.openBoard({0,0,1000,700});require(GetPixel(overlay.inkDC,0,0)==RGB(0,0,0),"Screen drawing transparent background");overlay.drawContacts({{0,.2,.2},{1,.8,.8}});require(overlay.inkHeads.size()==2,"Screen drawing multitouch");}
+    {BYTE report[30]={1,3,0xFB,5,0xBC,3};std::vector<PadContact> contacts;
+    require(parsePad(report,30,contacts)&&contacts.size()==1&&contacts[0].x==1&&contacts[0].y==1,"Touchpad coordinate normalization");
+    report[6]=7;report[7]=30;require(parsePad(report,30,contacts)&&contacts.size()==2,"Touchpad multiple fingers");
+    report[1]=0;report[6]=0;require(parsePad(report,30,contacts)&&contacts.empty(),"Touchpad release");
+    require(!parsePad(report,29,contacts),"Touchpad short report rejected");report[1]=3;report[3]=255;require(parsePad(report,30,contacts)&&contacts.empty(),"Touchpad invalid contact ignored");
+    Engine pad;pad.padReady=true;pad.padUntil=2;pad.padLastReport=0;pad.padContacts.push_back({0,.5,.5});pad.padBounds={0,0,1000,700};pad.padStep(.016,.016);require(!pad.particles.empty(),"Touchpad emits stardust");pad.padStep(.5,.016);require(pad.padContacts.empty(),"Touchpad stale contact cleared");pad.padStep(3,.016);require(!pad.padReady,"Touchpad idle shutdown");}
+
     {
         Engine orbit;orbit.blackHole.x=500;orbit.blackHole.y=500;orbit.blackHole.settings.blackHoleOrbitDamping=0;
         Particle star;star.kind=3;star.x=800;star.y=500;star.vy=orbit.blackHole.circularSpeed(300);
@@ -1331,7 +1373,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int) {
         engine.holdStarted=now();
         log(std::string("CopilotHook=Ready InitialHeld=")+(engine.copilotHold.held?"true":"false"));
         engine.setupBuffer();WNDCLASSEXW wc={};wc.cbSize=sizeof(wc);wc.lpfnWndProc=windowProc;wc.hInstance=instance;wc.lpszClassName=windowClass.c_str();RegisterClassExW(&wc);
-        HWND window=CreateWindowExW(WS_EX_LAYERED|WS_EX_TRANSPARENT|WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE|WS_EX_TOPMOST,windowClass.c_str(),L"차라리 이거 · 효과",WS_POPUP,engine.left,engine.top,engine.width,engine.height,NULL,NULL,instance,&engine);
+        HWND window=CreateWindowExW(WS_EX_LAYERED|WS_EX_TRANSPARENT|WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE|WS_EX_TOPMOST,windowClass.c_str(),L"이게 코파일럿보다 낫다 · 효과",WS_POPUP,engine.left,engine.top,engine.width,engine.height,NULL,NULL,instance,&engine);
         if(!window)throw std::runtime_error("Cannot create effect window");
         SetLayeredWindowAttributes(window,RGB(0,0,0),255,LWA_COLORKEY);
         GetCursorPos(&engine.previousCursor);engine.leftDown=down(VK_LBUTTON);engine.middleDown=down(VK_MBUTTON);engine.spaceDown=down(VK_SPACE);engine.started=engine.previous=now();
@@ -1345,7 +1387,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int) {
         activeEngine=NULL;ReleaseMutex(mutex);CloseHandle(mutex);return 0;
     } catch(const std::exception& error) {
         if(owner)ReleaseMutex(mutex);if(mutex)CloseHandle(mutex);log(std::string("Error=")+error.what());
-        if(logPath.empty())MessageBoxW(NULL,L"효과를 실행하지 못했습니다. settings.json과 실행 파일을 확인해 주세요.",L"차라리 이거",MB_OK|MB_ICONERROR);
+        if(logPath.empty())MessageBoxW(NULL,L"효과를 실행하지 못했습니다. settings.json과 실행 파일을 확인해 주세요.",L"이게 코파일럿보다 낫다",MB_OK|MB_ICONERROR);
         return 1;
     }
 }

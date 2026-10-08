@@ -6,6 +6,7 @@ using System.Text;
 public sealed class EffectSettings
 {
     public string Effect { get; set; }
+    public string DrawingSurface { get; set; }
     public int ConfettiCount { get; set; }
     public double ConfettiLife { get; set; }
     public double ConfettiSpeed { get; set; }
@@ -44,7 +45,7 @@ public sealed class EffectSettings
     public string Palette { get; set; }
     public EffectSettings()
     {
-        Effect = "cluster"; ConfettiCount = 280; ConfettiLife = 3.4; ConfettiSpeed = 1;
+        DrawingSurface = "screen"; Effect = "cluster"; ConfettiCount = 280; ConfettiLife = 3.4; ConfettiSpeed = 1;
         GravityCount = 130; GravityLife = 11; GravityStrength = 1; CollisionRadius = 16;
         ClusterCount = 150; ClusterFuse = .9; ClusterSpeed = 1;
         FireMode = "instant"; Palette = "neon"; SlingshotPower = 6; ClusterGravity = 600;
@@ -60,7 +61,8 @@ public sealed class EffectSettings
     { return Double.IsNaN(v) || Double.IsInfinity(v) ? fallback : Math.Max(low, Math.Min(high, v)); }
     public void Normalize()
     {
-        if (Effect != "confetti" && Effect != "gravity" && Effect != "cluster" && Effect != "blackhole" && Effect != "pendulum" && Effect != "crossflash" && Effect != "railgun" && Effect != "dice") Effect = "cluster";
+        if(DrawingSurface != "white") DrawingSurface = "screen";
+        if (Effect != "confetti" && Effect != "gravity" && Effect != "cluster" && Effect != "blackhole" && Effect != "pendulum" && Effect != "crossflash" && Effect != "railgun" && Effect != "dice" && Effect != "touchpad" && Effect != "drawing") Effect = "cluster";
         DiceSize = Clamp(DiceSize <= 0 ? 76 : DiceSize, 40, 140, 76);
         DiceSensitivity = Clamp(DiceSensitivity <= 0 ? 1 : DiceSensitivity, .3, 3, 1);
         DiceStopDelay = Clamp(DiceStopDelay <= 0 ? .18 : DiceStopDelay, .08, .6, .18);

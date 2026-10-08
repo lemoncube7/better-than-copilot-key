@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
@@ -32,7 +32,8 @@ static class Updates
     const string Repo="https://github.com/lemoncube7/better-than-copilot-key";
     const string AssetName="better-than-copilot-key-windows-x64.zip";
     const long MaxZip=32*1024*1024;
-    static readonly string[] Executables={"차라리 이거.exe","copilot_key.exe"};
+    const string NewApp="이게 코파일럿보다 낫다.exe";
+    static readonly string[] Executables={Path.GetFileName(Application.ExecutablePath)==NewApp?NewApp:"차라리 이거.exe","copilot_key.exe"};
     public static Version Current {get{return Assembly.GetExecutingAssembly().GetName().Version;}}
     public static string VersionLabel {get{return Current.ToString(3);}}
     static HttpWebRequest Request(string url)
@@ -144,8 +145,11 @@ static class Updates
     {
         string temp=Path.GetFullPath(Encoding.UTF8.GetString(Convert.FromBase64String(args[1])));
         string target=Path.GetFullPath(Encoding.UTF8.GetString(Convert.FromBase64String(args[2])));
-        string staged=Path.Combine(temp,"files");string app=Path.Combine(target,Executables[0]);
+        string staged=Path.Combine(temp,"files");
         Process parent=Process.GetProcessById(Int32.Parse(args[3]));
+        string parentName=Path.GetFileName(parent.MainModule.FileName);
+        if(parentName!=NewApp&&parentName!="차라리 이거.exe")throw new InvalidOperationException("알 수 없는 업데이트 대상입니다.");
+        Executables[0]=parentName;string app=Path.Combine(target,Executables[0]);
         if(!String.Equals(Path.GetFullPath(parent.MainModule.FileName),app,StringComparison.OrdinalIgnoreCase))throw new InvalidOperationException("업데이트 대상 프로세스가 다릅니다.");
         File.WriteAllText(Path.Combine(temp,"installer.ready"),"ready");
         if(!parent.WaitForExit(15000))throw new IOException("설정 창이 종료되지 않아 업데이트를 중단했습니다.");
@@ -156,7 +160,7 @@ static class Updates
         }
         catch(Exception e)
         {
-            MessageBox.Show("업데이트하지 못했습니다. 기존 버전을 유지합니다.\r\n"+e.Message,"차라리 이거");
+            MessageBox.Show("업데이트하지 못했습니다. 기존 버전을 유지합니다.\r\n"+e.Message,"이게 코파일럿보다 낫다");
             if(File.Exists(app))Process.Start(new ProcessStartInfo(app){UseShellExecute=true});
         }
     }
