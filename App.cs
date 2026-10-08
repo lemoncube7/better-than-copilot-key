@@ -74,8 +74,8 @@ sealed class SettingsWindow : Form
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 80));
         root.Controls.Add(new Label { Text = "버튼 하나, 잠깐의 즐거움", Font = new Font(Font.FontFamily, 20, FontStyle.Bold), Dock = DockStyle.Fill }, 0, 0);
         root.Controls.Add(new Label { Text = "Copilot 대신, 심심할 때 만지작. 효과를 고르고 조정하세요.", Dock = DockStyle.Fill, ForeColor = Color.LightSteelBlue }, 0, 1);
-        ConfigureCombo(effect, new string[] { "색종이 폭죽", "커서 중력장", "별가루 클러스터", "블랙홀 · hold", "진자 · 놓으면 발사", "십자가 섬광 · hold", "레일건 · 휠 충전", "주사위 · 흔들어서 굴리기", "터치패드 · 별가루", "터치패드 · 그림판" });
-        effect.SelectedIndex = Array.IndexOf(new string[] { "confetti", "gravity", "cluster", "blackhole", "pendulum", "crossflash", "railgun", "dice", "touchpad", "drawing" }, settings.Effect);
+        ConfigureCombo(effect, new string[] { "색종이 폭죽", "커서 중력장", "별가루 클러스터", "블랙홀 · hold", "진자 · 놓으면 발사", "십자가 섬광 · hold", "레일건 · 휠 충전", "주사위 · 흔들어서 굴리기", "터치패드 · 별가루", "터치패드 · 그림판", "유도탄 난사 · 놓으면 발사" });
+        effect.SelectedIndex = Array.IndexOf(new string[] { "confetti", "gravity", "cluster", "blackhole", "pendulum", "crossflash", "railgun", "dice", "touchpad", "drawing", "homing" }, settings.Effect);
         root.Controls.Add(Row("Copilot 키 효과", effect), 0, 2);
         ConfigureCombo(palette, new string[] { "네온", "파스텔", "차가운 별빛", "따뜻한 불꽃" });
         palette.SelectedIndex = Array.IndexOf(new string[] { "neon", "pastel", "ice", "warm" }, settings.Palette);
@@ -83,7 +83,7 @@ sealed class SettingsWindow : Form
         controls.Dock = DockStyle.Fill; controls.FlowDirection = FlowDirection.TopDown; controls.WrapContents = false; controls.AutoScroll = true;
         root.Controls.Add(controls, 0, 4);
         Label note = new Label { Dock = DockStyle.Fill, ForeColor = Color.LightSteelBlue,
-            Text = "최상단 · 클릭 통과 · Esc로 종료 · 효과 창 하나\r\n레일건 hold 중 휠·가운데 클릭 차단. 그 외 클릭은 통과합니다." };
+            Text = "Copilot + F12 → 설정 · Esc로 종료 · 최상단 · 클릭 통과\r\n레일건 hold 중 휠·가운데 클릭 차단. 그 외 클릭은 통과합니다." };
         root.Controls.Add(note, 0, 5);
         FlowLayoutPanel buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false };
         Button preview = Button("미리보기", Color.FromArgb(96, 93, 230));
@@ -104,7 +104,7 @@ sealed class SettingsWindow : Form
         };
         Controls.Add(root);
         BuildEffectControls();
-        effect.SelectedIndexChanged += delegate { settings.Effect = new string[] { "confetti", "gravity", "cluster", "blackhole", "pendulum", "crossflash", "railgun", "dice", "touchpad", "drawing" }[effect.SelectedIndex]; BuildEffectControls(); status.Text = "변경 후 저장하면 Copilot 키에 적용됩니다."; };
+        effect.SelectedIndexChanged += delegate { settings.Effect = new string[] { "confetti", "gravity", "cluster", "blackhole", "pendulum", "crossflash", "railgun", "dice", "touchpad", "drawing", "homing" }[effect.SelectedIndex]; BuildEffectControls(); status.Text = "변경 후 저장하면 Copilot 키에 적용됩니다."; };
         palette.SelectedIndexChanged += delegate { settings.Palette = new string[] { "neon", "pastel", "ice", "warm" }[palette.SelectedIndex]; };
         preview.Click += delegate { try { App.Preview(settings); status.Text = "현재 값으로 미리보기 중 · 저장된 설정은 바뀌지 않습니다."; } catch (Exception e) { status.Text = e.Message; } };
         save.Click += delegate { try { EffectSettings.Save(settings); status.Text = "저장했습니다. 다음 Copilot 키 실행부터 적용됩니다."; } catch (Exception e) { status.Text = "저장 실패: " + e.Message; } };
@@ -181,6 +181,10 @@ sealed class SettingsWindow : Form
             FlightGravity();
             controls.Controls.Add(new Label { Text = "매다는 지점이 커서를 따라옵니다. 흔들어서 가속하세요.\r\n놓으면 커서 이동 속도까지 합쳐서 날아갑니다.", Width = 560, Height = 65, ForeColor = Color.LightSteelBlue });
         }
+        else if (settings.Effect == "homing")
+        {
+            controls.Controls.Add(new Label { Text = "Copilot을 누른 위치에 발사점을 설치합니다.\r\n커서를 목표 위치로 옮기고 놓으면 3발씩 10묶음을 연속 발사합니다.\r\n탄이 뒤로 흩어졌다가 휘어 돌아오며 원형 폭발을 만듭니다.\r\n미리보기는 커서 옆을 향해 자동 발사 · Esc로 취소.", Width = 560, Height = 150, ForeColor = Color.LightSteelBlue });
+        }
         else if (settings.Effect == "drawing")
         {
             ChoiceControl surface=new ChoiceControl();ConfigureCombo(surface,new string[]{"화면 위에 그리기","흰 그림판"});
@@ -201,10 +205,10 @@ sealed class SettingsWindow : Form
         }
         else if (settings.Effect == "railgun")
         {
-            Number("휠 한 칸당 충전 (%)", settings.RailChargePerNotch, 1, 25, 0, 1, delegate(double v) { settings.RailChargePerNotch = v; });
+            Number("휠·두 손가락 충전량 (%)", settings.RailChargePerNotch, 1, 25, 0, 1, delegate(double v) { settings.RailChargePerNotch = v; });
             Number("발사 위력 배율", settings.RailPower, .5m, 2, 1, .1m, delegate(double v) { settings.RailPower = v; });
             Number("충돌 파편 수", settings.RailImpactCount, 50, 800, 0, 50, delegate(double v) { settings.RailImpactCount = (int)v; });
-            controls.Controls.Add(new Label { Text = "hold 시작 위치에 설치 · 휠 클릭으로 추가 설치 (최대 16개)\r\n휠로 함께 충전 · 마우스로 조준 · 놓으면 동시 발사", Width = 560, Height = 65, ForeColor = Color.LightSteelBlue });
+            controls.Controls.Add(new Label { Text = "hold 시작 위치에 설치 · 휠 클릭으로 추가 설치 (최대 16개)\r\n휠 또는 두 손가락 이동으로 함께 충전\r\n패드 폭 약 3.5% 이동 = 휠 한 칸 · 놓으면 동시 발사", Width = 560, Height = 100, ForeColor = Color.LightSteelBlue });
         }
         else if (settings.Effect == "crossflash")
         {
@@ -250,7 +254,7 @@ sealed class SettingsWindow : Form
                 try
                 {
                     Directory.CreateDirectory(directory);
-                    for (int i = 0; i < 10; i++)
+                    for (int i = 0; i < 11; i++)
                     {
                         effect.VerifyMenuSelection(i); PerformLayout(); controls.PerformLayout();
                         using (Bitmap bitmap = new Bitmap(Width, Height)) { DrawToBitmap(bitmap, new Rectangle(0, 0, Width, Height)); bitmap.Save(Path.Combine(directory, "settings-" + i + ".png")); }

@@ -21,6 +21,7 @@ static bool acceptTestInput = false;
 static const UINT CopilotMessage = WM_APP + 23;
 static const UINT RailWheelMessage = WM_APP + 24;
 static const UINT RailPlaceMessage = WM_APP + 25;
+static const UINT SettingsMessage = WM_APP + 26;
 static LRESULT CALLBACK railMouseHook(int code,WPARAM message,LPARAM payload);
 struct CopilotEvent { bool up; DWORD time; POINT position; int wheel=0;bool isWheel=false; };
 struct HoldState {
@@ -128,7 +129,7 @@ struct Settings {
         };
         str("DrawingSurface",s.drawingSurface);if(s.drawingSurface!="white")s.drawingSurface="screen";
         str("Effect", s.effect); str("Palette", s.palette); str("FireMode", s.fire);
-        if (s.effect != "cluster" && s.effect != "gravity" && s.effect != "confetti" && s.effect != "blackhole" && s.effect != "pendulum" && s.effect != "crossflash" && s.effect != "railgun" && s.effect != "dice" && s.effect != "touchpad" && s.effect != "drawing") s.effect = "cluster";
+        if (s.effect != "cluster" && s.effect != "gravity" && s.effect != "confetti" && s.effect != "blackhole" && s.effect != "pendulum" && s.effect != "crossflash" && s.effect != "railgun" && s.effect != "dice" && s.effect != "touchpad" && s.effect != "drawing" && s.effect != "homing") s.effect = "cluster";
         if (s.palette != "neon" && s.palette != "pastel" && s.palette != "ice" && s.palette != "warm") s.palette = "neon";
         if (s.fire != "instant" && s.fire != "left" && s.fire != "middle" && s.fire != "space" && s.fire != "slingshot") s.fire = "instant";
         s.confettiCount = int(num("ConfettiCount", 280, 20, 1200)); s.gravityCount = int(num("GravityCount", 130, 10, 800)); s.clusterCount = int(num("ClusterCount", 150, 20, 1000));
@@ -150,7 +151,7 @@ struct Settings {
 struct Bounds { double left, top, right, bottom; };
 struct Particle {
     int kind = 0; double x = 0, y = 0, vx = 0, vy = 0, size = 3, angle = 0, spin = 0, born = 0, life = 1, strength = 1, radius = 16; COLORREF color = RGB(255,255,255);
-    bool confined = false; Bounds bounds = {}; double fall=70,drag=1.6,travel=0;int arm=0;
+    int railStyle=0;bool confined = false; Bounds bounds = {}; double fall=70,drag=1.6,travel=0;int arm=0;
 };
 struct Cluster {
     double x, y, vx, vy, born; Bounds bounds; Settings settings; COLORREF color;
@@ -330,12 +331,12 @@ static COLORREF colorForFixed(const std::string& palette) {
     return palette=="warm"?RGB(255,200,95):palette=="ice"?RGB(150,225,255):palette=="pastel"?RGB(210,185,255):RGB(130,205,255);
 }
 struct Engine {
-    HWND window = NULL; HDC buffer = NULL; HBITMAP bitmap = NULL; HGDIOBJ oldBitmap = NULL; HFONT font = NULL;
+    HWND window = NULL; BYTE* bufferPixels = NULL; BYTE* coveragePixels = NULL; HDC coverageDC=NULL; HBITMAP coverageBitmap=NULL; HGDIOBJ coverageOld=NULL; HDC buffer = NULL; HBITMAP bitmap = NULL; HGDIOBJ oldBitmap = NULL; HFONT font = NULL;
     int left, top, width, height, triggers = 0, explosions = 0, collisions = 0;
     std::vector<Particle> particles; std::vector<Cluster> clusters; std::vector<Pending> pending;
     Settings armed; bool isArmed = false, leftDown = false, middleDown = false, spaceDown = false, firstPaint = false;
     double started = 0, previous = 0, armedUntil = 0, mouseVX = 0, mouseVY = 0; POINT previousCursor = {};
-    RECT previousBounds = {}; bool closing = false, snapshotSaved = false;
+    RECT previousBounds = {}, pendingPaint = {}; bool closing = false, snapshotSaved = false;
     HHOOK keyboardHook = NULL;
     HHOOK mouseHook = NULL;bool railInputHeld=false;
     HoldState copilotHold;
@@ -348,9 +349,57 @@ struct Engine {
     std::vector<CollectedBurst> collectedBursts;
     CrossState cross;
     RailState rail;std::vector<RailState> extraRails;
+    struct GuidedShot {double x,y,vx,vy,targetX,targetY,goalX,goalY,nx,ny,born;Bounds bounds;COLORREF color;};
+    std::vector<GuidedShot> guidedShots;
+    bool homingReady=false,homingHolding=false;double homingX=0,homingY=0,homingUntil=0;
+    Settings homingSettings;
+    void releaseHoming(double tx,double ty,double time){
+        if(!homingReady||!homingHolding)return;
+        homingReady=false;homingHolding=false;
+        Bounds b=monitor(homingX,homingY);b.left+=8;b.top+=8;b.right-=8;b.bottom-=8;
+        tx=clamp(tx,b.left,b.right);ty=clamp(ty,b.top,b.bottom);
+        double dx=tx-homingX,dy=ty-homingY;
+        if(std::hypot(dx,dy)<40){tx=clamp(homingX+(homingX<(b.left+b.right)/2?320:-320),b.left,b.right);dx=tx-homingX;}
+        double distance=std::max(1.,std::hypot(dx,dy)),angle=std::atan2(dy,dx);
+        for(int group=0;group<10;++group)for(int j=0;j<3;++j){
+            double a=angle+3.14159265359+(random01()-.5)*.78539816339,speed=960+random01()*120;
+            guidedShots.push_back({homingX,homingY,std::cos(a)*speed,std::sin(a)*speed,tx,ty,
+                homingX+dx*.66,homingY+dy*.66,dx/distance,dy/distance,time+group/30.,b,colorFor(homingSettings.palette)});
+        }
+        log("Homing=Volley Count=30 Target="+std::to_string(tx)+","+std::to_string(ty));invalidate();
+    }
+    void stepHoming(double time,double dt){
+        for(size_t i=guidedShots.size();i-- >0;){
+            GuidedShot& m=guidedShots[i];if(time<m.born)continue;
+            double remaining=std::min(dt,time-m.born);bool hit=false;
+            while(remaining>0){
+                double h=std::min(remaining,1./240.),dx=m.goalX-m.x,dy=m.goalY-m.y,d=std::max(1.,std::hypot(dx,dy));
+                m.vx+=dx/d*1800*h;m.vy+=dy/d*1800*h;
+                double ox=m.x,oy=m.y,old=(ox-m.targetX)*m.nx+(oy-m.targetY)*m.ny;
+                m.x+=m.vx*h;m.y+=m.vy*h;
+                double next=(m.x-m.targetX)*m.nx+(m.y-m.targetY)*m.ny;
+                if(old<0&&next>=0){double t=-old/(next-old);m.x=ox+(m.x-ox)*t;m.y=oy+(m.y-oy)*t;hit=true;break;}
+                remaining-=h;
+            }
+            if(hit||time-m.born>6){
+                m.x=clamp(m.x,m.bounds.left,m.bounds.right);m.y=clamp(m.y,m.bounds.top,m.bounds.bottom);
+                shocks.push_back({m.x,m.y,time,m.color});++explosions;
+                guidedShots[i]=guidedShots.back();guidedShots.pop_back();
+            }
+        }
+    }
+    void drawHoming(double time){
+        if(homingReady){star(homingX,homingY,10,RGB(255,255,255));
+            const wchar_t* text=L"커서를 목표로 옮기고 놓으면 연속 발사";SetTextColor(buffer,RGB(180,220,255));TextOutW(buffer,int(homingX+20),int(homingY+20),text,lstrlenW(text));}
+        for(const GuidedShot& m:guidedShots)if(time>=m.born){
+            double speed=std::max(1.,std::hypot(m.vx,m.vy));
+            line(m.x-m.vx/speed*16,m.y-m.vy/speed*16,m.x,m.y,fadeColor(m.color,.45));
+            star(m.x,m.y,3,m.color);star(m.x,m.y,1,RGB(255,255,255));
+        }
+    }
     DiceState dice;bool middleCaptured=false;
     std::vector<RailTrace> railTraces;
-    bool cancelUntilUp=false;
+    bool cancelUntilUp=false,settingsPending=false,f12Captured=false;
     #include "TouchpadDraw.inl"
     #include "TouchpadEngine.inl"
     Engine() {
@@ -360,13 +409,22 @@ struct Engine {
     }
     ~Engine() {
         freeInk();
+        if(coverageDC){SelectObject(coverageDC,coverageOld);DeleteDC(coverageDC);}
+        if(coverageBitmap)DeleteObject(coverageBitmap);
         if(keyboardHook)UnhookWindowsHookEx(keyboardHook);
         if(mouseHook)UnhookWindowsHookEx(mouseHook);
         if (buffer) { SelectObject(buffer, oldBitmap); DeleteDC(buffer); }
         if (bitmap) DeleteObject(bitmap); if (font) DeleteObject(font);
     }
     void setupBuffer() {
-        HDC screen = GetDC(NULL); buffer = CreateCompatibleDC(screen); bitmap = CreateCompatibleBitmap(screen, width, height); ReleaseDC(NULL, screen);
+        HDC screen = GetDC(NULL); buffer = CreateCompatibleDC(screen); BITMAPINFO info={};info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);info.bmiHeader.biWidth=width;info.bmiHeader.biHeight=-height;info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;info.bmiHeader.biCompression=BI_RGB;
+        bitmap = CreateDIBSection(screen,&info,DIB_RGB_COLORS,reinterpret_cast<void**>(&bufferPixels),NULL,0); coverageDC=CreateCompatibleDC(screen);
+        coverageBitmap=CreateDIBSection(screen,&info,DIB_RGB_COLORS,reinterpret_cast<void**>(&coveragePixels),NULL,0);
+        ReleaseDC(NULL, screen);
+        if(!coverageDC||!coverageBitmap)throw std::runtime_error("Cannot create opacity buffer");
+        coverageOld=SelectObject(coverageDC,coverageBitmap);
+        SelectObject(coverageDC,GetStockObject(DC_PEN));SelectObject(coverageDC,GetStockObject(DC_BRUSH));
+        RECT coverageRect={0,0,width,height};FillRect(coverageDC,&coverageRect,(HBRUSH)GetStockObject(BLACK_BRUSH));
         if (!buffer || !bitmap) throw std::runtime_error("Cannot create effect buffer");
         oldBitmap = SelectObject(buffer, bitmap); RECT all = {0,0,width,height}; FillRect(buffer,&all,(HBRUSH)GetStockObject(BLACK_BRUSH));
         SelectObject(buffer, GetStockObject(DC_PEN)); SelectObject(buffer, GetStockObject(DC_BRUSH));
@@ -390,10 +448,10 @@ struct Engine {
     }
     void trigger(const Settings& s,const POINT* position=NULL) {
         if(cancelUntilUp)return;
-        padReady=false;padContacts.clear();drawing=false;penDown=false;
+        padReady=false;padRail=false;railPadHeads.clear();railPadCredit=0;padContacts.clear();drawing=false;penDown=false;
         double time=now(); POINT cursor;if(position)cursor=*position;else GetCursorPos(&cursor);isArmed=false;sling.ready=false;sling.pulling=false;
         pendulum.ready=false;pendulum.hanging=false;blackHole.ready=false;blackHole.pulling=false;
-        cross.ready=false;cross.pulling=false;rail.ready=false;rail.holding=false;extraRails.clear();dice.visible=false;
+        cross.ready=false;cross.pulling=false;rail.ready=false;rail.holding=false;extraRails.clear();dice.visible=false;homingReady=false;homingHolding=false;
         for(Particle& p:particles)if(p.kind==3||p.kind==4){p.kind=2;p.born=time;p.life=1.2;}
         log("Trigger="+std::to_string(++triggers)+" Effect="+s.effect+" Window="+std::to_string(reinterpret_cast<UINT_PTR>(window)));
         if(s.effect=="touchpad"||s.effect=="drawing") {
@@ -420,9 +478,13 @@ struct Engine {
             dice=DiceState();dice.settings=s;dice.visible=true;dice.holding=copilotHold.held;
             dice.lastX=cursor.x-left;dice.lastY=cursor.y-top;dice.x=dice.lastX+95;dice.y=dice.lastY-65;
             dice.lastMotion=time;dice.until=time+8;log("Dice=Ready");
+        } else if(s.effect=="homing") {
+            homingSettings=s;homingX=cursor.x-left;homingY=cursor.y-top;homingReady=true;homingHolding=true;homingUntil=time+8;
+            if(!copilotHold.held)releaseHoming(homingX,homingY,time);
         } else if(s.effect=="railgun") {
             rail.settings=s;rail.x=cursor.x-left;rail.y=cursor.y-top;rail.dx=1;rail.dy=0;rail.energy=0;
             rail.ready=true;rail.holding=copilotHold.held;rail.until=time+8;rail.visibleUntil=-100;rail.firedAt=-100;
+            RAWINPUTDEVICE device={0x0D,5,RIDEV_INPUTSINK,window};padRail=true;padReady=RegisterRawInputDevices(&device,1,sizeof(device))!=FALSE;padLastReport=-100;padPackets=0;log(padReady?"RailTouchpad=Registered":"RailTouchpad=Unavailable");
             log(std::string("Rail=")+(rail.holding?"Installed":"Ready")+" Position="+std::to_string(rail.x)+","+std::to_string(rail.y));
         } else if(s.effect=="crossflash") {
             cross.settings=s;cross.x=cursor.x-left;cross.y=cursor.y-top;cross.ready=true;cross.pulling=copilotHold.held;
@@ -558,6 +620,11 @@ struct Engine {
     }
     bool blocksWheel()const{return rail.ready&&railInputHeld&&!cancelUntilUp&&!closing;}
     void chargeRail(int delta) {
+        // Windows may synthesize a wheel event for the same two-finger movement.
+        if(padRail&&padContacts.size()==2&&now()-padLastReport<.25)return;
+        chargeRailAmount(delta);
+    }
+    void chargeRailAmount(int delta) {
         if(!rail.ready||!rail.holding||cancelUntilUp)return;
         rail.charge(delta);for(auto& gun:extraRails)gun.charge(delta);log("Rail=Charge Delta="+std::to_string(delta)+" Energy="+std::to_string(rail.energy));invalidate();
     }
@@ -568,6 +635,7 @@ struct Engine {
     }
     void releaseRail(double cx,double cy,double time) {
         fireRail(rail,cx,cy,time);for(auto& gun:extraRails)fireRail(gun,cx,cy,time);
+        if(padRail){padReady=false;padContacts.clear();railPadHeads.clear();railPadCredit=0;}
     }
     void fireRail(RailState& rail,double cx,double cy,double time) {
         if(!rail.ready||!rail.holding)return;
@@ -627,22 +695,46 @@ struct Engine {
         launch(shot,sling.pouchX,sling.pouchY,sling.vx(),sling.vy(),time);
         sling.ready=false;sling.pulling=false;invalidate();
     }
+    void openSettings(){
+        std::wstring exe=directory+L"이게 코파일럿보다 낫다.exe";
+        HWND existing=FindWindowW(NULL,L"이게 코파일럿보다 낫다 · 효과 설정");
+        if(existing){DWORD pid=0;GetWindowThreadProcessId(existing,&pid);
+            HANDLE process=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,FALSE,pid);
+            wchar_t path[32768];DWORD length=32768;bool same=process&&QueryFullProcessImageNameW(process,0,path,&length)&&
+                (_wcsicmp(path,exe.c_str())==0||_wcsicmp(path,(directory+L"차라리 이거.exe").c_str())==0);
+            if(process)CloseHandle(process);
+            if(same){ShowWindow(existing,SW_RESTORE);SetForegroundWindow(existing);log("SettingsShortcut=Reused");return;}}
+        std::wstring command=L"\""+exe+L"\"";
+        STARTUPINFOW startup={};startup.cb=sizeof(startup);startup.dwFlags=STARTF_FORCEOFFFEEDBACK;
+        PROCESS_INFORMATION process={};
+        if(!CreateProcessW(exe.c_str(),&command[0],NULL,NULL,FALSE,0,NULL,directory.c_str(),&startup,&process)){
+            log("SettingsShortcutError="+std::to_string(GetLastError()));return;}
+        AllowSetForegroundWindow(process.dwProcessId);CloseHandle(process.hThread);CloseHandle(process.hProcess);
+        log("SettingsShortcut=Opened");
+    }
+    void requestSettings(){
+        if(settingsPending||closing)return;
+        settingsPending=true;log("SettingsShortcut=Requested");
+        if(copilotHold.held)finish("Escape");
+        else {openSettings();finish("SettingsShortcut");}
+    }
     void copilot(bool up,DWORD eventTime,const POINT* position=NULL) {
         if(closing)return;
         bool wasHeld=copilotHold.held;
         bool fresh=copilotHold.update(up);
-        if(cancelUntilUp) { if(up)finish("EscapeReleased");return; }
+        if(cancelUntilUp) { if(up){if(settingsPending)openSettings();finish("EscapeReleased");}return; }
         if(up) {
             log("Copilot=UP Held="+std::to_string(wasHeld)+" HoldMs="+std::to_string(wasHeld?(now()-holdStarted)*1000:0)+" EventTick="+std::to_string(eventTime));
             POINT cursor;if(position)cursor=*position;else GetCursorPos(&cursor);releaseSling(cursor.x-left,cursor.y-top,now());
             releasePendulum(now(),&cursor);releaseBlackHole(cursor.x-left,cursor.y-top,now());
             releaseCross(cursor.x-left,cursor.y-top,now());
             releaseRail(cursor.x-left,cursor.y-top,now());
+            releaseHoming(cursor.x-left,cursor.y-top,now());
             if(dice.visible&&dice.holding){dice.holding=false;dice.until=now()+1.5;log("Dice=Release");}
         } else if(fresh) {
             if(drawing){if(now()-drawOpened>.3)finish("DrawingToggle");return;}
             holdStarted=now();log("Copilot=DOWN EventTick="+std::to_string(eventTime));
-            try { Settings next=sling.ready?sling.settings:pendulum.ready?pendulum.settings:blackHole.ready?blackHole.settings:cross.ready?cross.settings:rail.ready?rail.settings:dice.visible?dice.settings:Settings::from(readFile(directory+L"settings.json"));trigger(next,position); }
+            try { Settings next=homingReady?homingSettings:sling.ready?sling.settings:pendulum.ready?pendulum.settings:blackHole.ready?blackHole.settings:cross.ready?cross.settings:rail.ready?rail.settings:dice.visible?dice.settings:Settings::from(readFile(directory+L"settings.json"));trigger(next,position); }
             catch(const std::exception& error) { log(std::string("SettingsError=")+error.what()); }
         } else log("Copilot=REPEAT Count="+std::to_string(copilotHold.repeats));
     }
@@ -659,6 +751,22 @@ struct Engine {
             added.push_back(p);
         }
     }
+    void railImpact(std::vector<Particle>& added,const Cluster& c,double time,bool edge){
+        size_t first=added.size();double charge=clamp(c.railEnergy/100,0,1);
+        sparks(added,c.x,c.y,0,0,c.settings.clusterCount,time,false,c.settings.palette,c.color,
+               edge?&c.bounds:NULL,c.edgeSides,30);
+        for(size_t i=first;i<added.size();++i){
+            Particle& p=added[i];double angle=std::atan2(p.vy,p.vx);
+            double speed=80+charge*1000+random01()*(120+charge*1800);
+            p.vx=std::cos(angle)*speed;p.vy=std::sin(angle)*speed;
+            p.size=1+charge*2+random01()*(1+charge*3);
+            p.life=.45+charge*1.5+random01()*(.35+charge*.7);
+            p.drag=2.4-charge*1.8;p.fall=30+charge*100;
+            p.railStyle=charge<.3?1:charge<.7?2:(i%4==0?3:2);
+            if(charge>=.7&&i%4==0)p.color=RGB(255,245,215);
+        }
+        if(charge>=.7)shocks.push_back({c.x,c.y,time,colorForFixed(c.settings.palette)});
+    }
     void physics(double time,double dt,double cx,double cy) {
         std::vector<Particle> added;
         for(size_t i=clusters.size();i-- >0;) {
@@ -670,7 +778,8 @@ struct Engine {
             if(age>=eventTime) {
                 if(edge) { c.x=c.edgeX;c.y=c.edgeY; }
                 ++explosions;log(std::string("Explosion=")+(edge?"Edge":"Timer")+" Position="+std::to_string(c.x)+","+std::to_string(c.y)+" FlightSeconds="+std::to_string(eventTime));
-                sparks(added,c.x,c.y,edge?0:c.vx*.2,edge?0:(c.vy+g*eventTime)*.2,c.settings.clusterCount,time,false,c.settings.palette,c.color,edge?&c.bounds:NULL,c.edgeSides);
+                if(c.railSlug)railImpact(added,c,time,edge);
+                else sparks(added,c.x,c.y,edge?0:c.vx*.2,edge?0:(c.vy+g*eventTime)*.2,c.settings.clusterCount,time,false,c.settings.palette,c.color,edge?&c.bounds:NULL,c.edgeSides);
                 clusters[i]=std::move(clusters.back());clusters.pop_back();
             }
         }
@@ -722,7 +831,8 @@ struct Engine {
     }
     void finish(const char* why) {
         if(closing)return;
-        padReady=false;padContacts.clear();drawing=false;penDown=false;
+        guidedShots.clear();homingReady=false;homingHolding=false;
+        padReady=false;padRail=false;railPadHeads.clear();railPadCredit=0;padContacts.clear();drawing=false;penDown=false;
         if(copilotHold.held&&std::string(why)=="Escape") {
             particles.clear();clusters.clear();pending.clear();shocks.clear();collectedBursts.clear();railTraces.clear();extraRails.clear();dice.visible=false;rail.ready=false;rail.holding=false;rail.visibleUntil=-100;isArmed=false;sling.ready=false;sling.pulling=false;pendulum.ready=false;pendulum.hanging=false;blackHole.ready=false;blackHole.pulling=false;cross.ready=false;cross.pulling=false;cross.flashAt=-100;cancelUntilUp=true;
             if(window)ShowWindow(window,SW_HIDE);log("Escape=Cancelled WaitForUp");return;
@@ -761,19 +871,23 @@ struct Engine {
         shocks.erase(std::remove_if(shocks.begin(),shocks.end(),[&](const Shock& wave){return time-wave.born>=.7;}),shocks.end());
         input(down(VK_LBUTTON),down(VK_MBUTTON),down(VK_SPACE),cx,cy,time);
         for(size_t i=pending.size();i-- >0;) if(time>=pending[i].due) { Pending p=pending[i];pending.erase(pending.begin()+i);launch(p.settings,p.x,p.y,mouseVX,mouseVY,time); }
+        stepHoming(time,dt);
+        if(homingReady&&!homingHolding&&time>=homingUntil)homingReady=false;
         physics(time,dt,cx,cy);
         emitCollectedBursts(time);
-        if(particles.empty()&&clusters.empty()&&pending.empty()&&shocks.empty()&&collectedBursts.empty()&&railTraces.empty()&&!isArmed&&!sling.ready&&!pendulum.ready&&!blackHole.ready&&!cross.ready&&!dice.visible&&!rail.ready&&time>=rail.visibleUntil&&!padReady&&!copilotHold.held) { finish("Empty");return; }
+        if(guidedShots.empty()&&!homingReady&&particles.empty()&&clusters.empty()&&pending.empty()&&shocks.empty()&&collectedBursts.empty()&&railTraces.empty()&&!isArmed&&!sling.ready&&!pendulum.ready&&!blackHole.ready&&!cross.ready&&!dice.visible&&!rail.ready&&time>=rail.visibleUntil&&!padReady&&!copilotHold.held) { finish("Empty");return; }
         invalidate();
     }
     void invalidate() {
         RECT bounds={};
         if(drawing)bounds=board;
+        if(homingReady)bounds={LONG(homingX-20),LONG(homingY-20),LONG(homingX+380),LONG(homingY+70)};
         auto include=[&](double x,double y,double vx,double vy) {
             RECT r={LONG(std::floor(std::min(x,x-vx*.06)-20)),LONG(std::floor(std::min(y,y-vy*.06)-20)),LONG(std::ceil(std::max(x,x-vx*.06)+20)),LONG(std::ceil(std::max(y,y-vy*.06)+20))};
             if(IsRectEmpty(&bounds))bounds=r;else UnionRect(&bounds,&bounds,&r);
         };
-        for(const PadContact& c:padContacts)include(padBounds.left+24+c.x*(padBounds.right-padBounds.left-48),padBounds.top+24+c.y*(padBounds.bottom-padBounds.top-48),0,0);
+        for(const PadContact& c:padContacts)if(!padRail)include(padBounds.left+24+c.x*(padBounds.right-padBounds.left-48),padBounds.top+24+c.y*(padBounds.bottom-padBounds.top-48),0,0);
+        for(const GuidedShot& m:guidedShots)if(now()>=m.born)include(m.x,m.y,m.vx,m.vy);
         for(const Particle& p:particles) if(p.x>-150&&p.y>-150&&p.x<width+150&&p.y<height+150)include(p.x,p.y,p.vx,p.vy);
         for(const Cluster& c:clusters)include(c.x,c.y,c.vx,c.vy+(c.settings.gravityEnabled?c.settings.gravity*std::max(0.,now()-c.born):0));
         if(rail.ready||now()<rail.visibleUntil){RECT r={LONG(rail.x-340),LONG(rail.y-340),LONG(rail.x+340),LONG(rail.y+340)};if(IsRectEmpty(&bounds))bounds=r;else UnionRect(&bounds,&bounds,&r);}
@@ -805,7 +919,7 @@ struct Engine {
         }
         if(isArmed) { POINT cursor;GetCursorPos(&cursor);RECT r={cursor.x-left-20,cursor.y-top-20,cursor.x-left+280,cursor.y-top+80};if(IsRectEmpty(&bounds))bounds=r;else UnionRect(&bounds,&bounds,&r); }
         RECT all={0,0,width,height};IntersectRect(&bounds,&bounds,&all);RECT dirty;UnionRect(&dirty,&bounds,&previousBounds);previousBounds=bounds;
-        if(window&&!IsRectEmpty(&dirty))InvalidateRect(window,&dirty,FALSE);
+        if(window&&!IsRectEmpty(&dirty)){UnionRect(&pendingPaint,&pendingPaint,&dirty);InvalidateRect(window,&dirty,FALSE);}
     }
     void line(double x,double y,double nx,double ny,COLORREF color) { SetDCPenColor(buffer,color);MoveToEx(buffer,int(x),int(y),NULL);LineTo(buffer,int(nx),int(ny)); }
     void star(double x,double y,double size,COLORREF color) { line(x-size,y,x+size,y,color);line(x,y-size,x,y+size,color); }
@@ -831,28 +945,42 @@ struct Engine {
         HPEN pen=CreatePen(PS_SOLID,std::max(1,width),color);HGDIOBJ old=SelectObject(buffer,pen);
         MoveToEx(buffer,int(x),int(y),NULL);LineTo(buffer,int(ex),int(ey));SelectObject(buffer,old);DeleteObject(pen);
     }
+    void opacityPolygon(const POINT* points,int count,double opacity=1){
+        int a=int(clamp(opacity,0,1)*255);COLORREF value=RGB(a,a,a);
+        SetDCBrushColor(coverageDC,value);SetDCPenColor(coverageDC,value);
+        Polygon(coverageDC,points,count);
+    }
+    void opacityEllipse(int x1,int y1,int x2,int y2,double opacity=1){
+        int a=int(clamp(opacity,0,1)*255);COLORREF value=RGB(a,a,a);
+        SetDCBrushColor(coverageDC,value);SetDCPenColor(coverageDC,value);
+        Ellipse(coverageDC,x1,y1,x2,y2);
+    }
+    void railChargeGlow(const RailState& rail,double fade,double charge,COLORREF accent){
+        if(charge<=0)return;
+        COLORREF light=RGB((GetRValue(accent)+255)/2,(GetGValue(accent)+255)/2,(GetBValue(accent)+255)/2);
+        // Premultiply a bright tint by its opacity. No opaque coverage is added.
+        for(int i=4;i>=0;--i){
+            double spread=18+i*10,opacity=fade*charge*charge*.32/(i+1);
+            POINT a=rail.world(40,-spread),b=rail.world(180,-spread);
+            POINT c=rail.world(40,spread),d=rail.world(180,spread);
+            COLORREF glow=fadeColor(light,opacity);
+            thickLine(a.x,a.y,b.x,b.y,glow,int(5+charge*15));
+            thickLine(c.x,c.y,d.x,d.y,glow,int(5+charge*15));
+        }
+    }
     void railDraw(const RailState& rail,double time) {
         double fade=rail.ready?1:clamp((rail.visibleUntil-time)/.25,0,1);
         double charge=rail.energy/100,recoil=rail.firedAt>-99?rail.energy*.2*std::exp(-(time-rail.firedAt)/.08):0;
         COLORREF accent=colorForFixed(rail.settings.palette);
-        if(charge>0){
-            for(int i=0;i<int(8+charge*34);++i){double phase=time*(1.4+charge*3)+i*2.39996323;
-                double radius=35+charge*105+std::sin(time*4+i)*18;
-                double x=rail.x+75*rail.dx+std::cos(phase)*radius,y=rail.y+75*rail.dy+std::sin(phase)*radius*.65;
-                star(x,y,1+charge*3,fadeColor(accent,fade*(.25+.65*charge)));
-                line(x,y,x-std::cos(phase)*charge*20,y-std::sin(phase)*charge*13,fadeColor(accent,fade*charge*.4));
-            }
-            for(int i=0;i<5;++i){double spread=18+i*10;POINT a=rail.world(40,-spread),b=rail.world(180,-spread),c=rail.world(40,spread),d=rail.world(180,spread);
-                thickLine(a.x,a.y,b.x,b.y,fadeColor(accent,fade*charge*charge*.15/(i+1)),int(5+charge*15));
-                thickLine(c.x,c.y,d.x,d.y,fadeColor(accent,fade*charge*charge*.15/(i+1)),int(5+charge*15));}
-        }
+        railChargeGlow(rail,fade,charge,accent);
         auto poly=[&](std::initializer_list<std::pair<double,double>> vertices,COLORREF fill,COLORREF edge){
             std::vector<POINT> points;for(const auto& v:vertices)points.push_back(rail.world(v.first,v.second,recoil));
-            SetDCBrushColor(buffer,fadeColor(fill,fade));SetDCPenColor(buffer,fadeColor(edge,fade));Polygon(buffer,points.data(),int(points.size()));
+            SetDCBrushColor(buffer,fadeColor(fill,fade));SetDCPenColor(buffer,fadeColor(edge,fade));Polygon(buffer,points.data(),int(points.size()));opacityPolygon(points.data(),int(points.size()),fade);
         };
         auto detail=[&](double a,double b,double c,double d,COLORREF color,int width=1){POINT p=rail.world(a,b,recoil),q=rail.world(c,d,recoil);thickLine(p.x,p.y,q.x,q.y,fadeColor(color,fade),width);};
         SelectObject(buffer,GetStockObject(DC_BRUSH));SetDCBrushColor(buffer,fadeColor(RGB(22,28,38),fade));SetDCPenColor(buffer,fadeColor(RGB(117,137,160),fade));
         Ellipse(buffer,int(rail.x-24),int(rail.y-20),int(rail.x+24),int(rail.y+20));
+        opacityEllipse(int(rail.x-24),int(rail.y-20),int(rail.x+24),int(rail.y+20),fade);
         thickLine(rail.x-32,rail.y+20,rail.x+32,rail.y+20,fadeColor(RGB(74,90,109),fade),5);
         poly({{-60,-20},{-40,-32},{20,-32},{41,-22},{41,22},{20,32},{-40,32},{-60,20}},RGB(28,36,48),RGB(105,124,147));
         poly({{-48,-16},{-35,-24},{6,-24},{17,-14},{17,14},{6,24},{-35,24},{-48,16}},RGB(46,58,73),RGB(134,151,170));
@@ -875,7 +1003,19 @@ struct Engine {
             detail(13,0,45,0,RGB(230,248,255),3);
         }
         for(const auto& bolt:std::vector<std::pair<double,double>>{{-37,-24},{8,-24},{-37,24},{8,24},{155,-20},{155,20}}){
-            POINT p=rail.world(bolt.first,bolt.second,recoil);SetDCBrushColor(buffer,fadeColor(RGB(166,185,205),fade));SetDCPenColor(buffer,fadeColor(RGB(16,23,32),fade));Ellipse(buffer,p.x-3,p.y-3,p.x+3,p.y+3);
+            POINT p=rail.world(bolt.first,bolt.second,recoil);SetDCBrushColor(buffer,fadeColor(RGB(166,185,205),fade));SetDCPenColor(buffer,fadeColor(RGB(16,23,32),fade));Ellipse(buffer,p.x-3,p.y-3,p.x+3,p.y+3);opacityEllipse(p.x-3,p.y-3,p.x+3,p.y+3,fade);
+        }
+        // Draw charging lights last so the gun body cannot cover them.
+        if(charge>0){
+            COLORREF light=RGB((GetRValue(accent)+255)/2,(GetGValue(accent)+255)/2,(GetBValue(accent)+255)/2);
+            for(int i=0;i<int(8+charge*34);++i){
+                double phase=time*(1.4+charge*3)+i*2.39996323;
+                double radius=35+charge*105+std::sin(time*4+i)*18;
+                double x=rail.x+75*rail.dx+std::cos(phase)*radius,y=rail.y+75*rail.dy+std::sin(phase)*radius*.65;
+                line(x,y,x-std::cos(phase)*charge*20,y-std::sin(phase)*charge*13,fadeColor(light,fade*.8));
+                star(x,y,1+charge*3,fadeColor(light,fade));
+                star(x,y,1,fadeColor(RGB(255,255,255),fade));
+            }
         }
         std::wstring label=rail.holding?L"에너지 "+std::to_wstring(int(std::lround(rail.energy)))+L"% · 휠 클릭 추가 · 놓으면 발사":rail.ready?L"Copilot hold → 휠로 충전":L"발사";
         SetTextColor(buffer,fadeColor(accent,fade));TextOutW(buffer,int(rail.x-95),int(rail.y+70),label.c_str(),int(label.size()));
@@ -893,7 +1033,7 @@ struct Engine {
         for(int f=0;f<6;++f){V n=rotate(normals[f]);if(n.z<=.001)continue;if(n.z>best){best=n.z;face=f+1;}
             auto point=[&](double a,double b){V q={normals[f].x+us[f].x*a+vs[f].x*b,normals[f].y+us[f].y*a+vs[f].y*b,normals[f].z+us[f].z*a+vs[f].z*b};return project(rotate(q));};
             POINT quad[4]={point(-1,-1),point(1,-1),point(1,1),point(-1,1)};
-            SetDCBrushColor(buffer,fadeColor(RGB(238,245,255),.5+.5*n.z));SetDCPenColor(buffer,RGB(130,170,220));Polygon(buffer,quad,4);
+            SetDCBrushColor(buffer,fadeColor(RGB(238,245,255),.5+.5*n.z));SetDCPenColor(buffer,RGB(130,170,220));Polygon(buffer,quad,4);opacityPolygon(quad,4);
             int number=f+1;std::vector<std::pair<double,double>> dots;
             if(number%2)dots.push_back({0,0});
             if(number>=2){dots.push_back({-.5,-.5});dots.push_back({.5,.5});}
@@ -905,10 +1045,34 @@ struct Engine {
         std::wstring label=dice.settled?L"결과 "+std::to_wstring(face):L"흔들어서 굴리기";
         SetTextColor(buffer,RGB(180,220,255));TextOutW(buffer,int(dice.x-60),int(dice.y+dice.settings.diceSize*.8+15),label.c_str(),int(label.size()));
     }
+    void finalizeAlpha(const RECT* dirty=NULL){
+        // GDI writes RGB only. RGB drawn over black already represents premultiplied
+        // light intensity; supply its coverage as alpha instead of a color key.
+        GdiFlush();
+        double holeRadius=blackHole.ready?blackHole.radius():0;
+        RECT area=dirty?*dirty:RECT{0,0,width,height};
+        for(int y=area.top;y<area.bottom;++y)for(int x=area.left;x<area.right;++x){
+            BYTE* pixel=bufferPixels+(size_t(y)*width+x)*4;
+            int alpha=std::max(int(pixel[0]),std::max(int(pixel[1]),int(pixel[2])));
+            alpha=std::max(alpha,int(coveragePixels[(size_t(y)*width+x)*4]));
+            if(drawing&&x>=board.left&&x<board.right&&y>=board.top&&y<board.bottom&&
+               (padSettings.drawingSurface=="white"||alpha>0))alpha=255;
+            if(blackHole.ready){double dx=x-blackHole.x,dy=y-blackHole.y;
+                if(dx*dx+dy*dy<holeRadius*holeRadius)alpha=255;}
+            pixel[3]=BYTE(alpha);
+        }
+    }
     void paint() {
-        PAINTSTRUCT ps;HDC target=BeginPaint(window,&ps);
-        HRGN region=CreateRectRgnIndirect(&ps.rcPaint);SelectClipRgn(buffer,region);DeleteObject(region);
-        FillRect(buffer,&ps.rcPaint,(HBRUSH)GetStockObject(BLACK_BRUSH));double time=now();
+        // BeginPaint temporarily hides the cursor over the invalid region.
+        // This overlay presents through UpdateLayeredWindow, not the paint DC.
+        PAINTSTRUCT ps={};ValidateRect(window,NULL);
+        // Track our own dirty region; do not rely on a layered window paint DC.
+        if(IsRectEmpty(&pendingPaint))return;
+        ps.rcPaint=pendingPaint;SetRectEmpty(&pendingPaint);
+        HRGN clip=CreateRectRgnIndirect(&ps.rcPaint);
+        SelectClipRgn(buffer,clip);SelectClipRgn(coverageDC,clip);DeleteObject(clip);
+        FillRect(buffer,&ps.rcPaint,(HBRUSH)GetStockObject(BLACK_BRUSH));
+        FillRect(coverageDC,&ps.rcPaint,(HBRUSH)GetStockObject(BLACK_BRUSH));double time=now();
         if(drawing&&inkDC)BitBlt(buffer,board.left,board.top,board.right-board.left,board.bottom-board.top,inkDC,0,0,SRCCOPY);
         for(const Cluster& c:clusters) {
             if(c.railSlug){double speed=std::max(1.,std::hypot(c.vx,c.vy)),tail=75+c.railEnergy*.75;thickLine(c.x-c.vx/speed*tail,c.y-c.vy/speed*tail,c.x,c.y,fadeColor(c.color,.6),9);thickLine(c.x-c.vx/speed*tail,c.y-c.vy/speed*tail,c.x,c.y,RGB(255,255,255),3);}
@@ -918,6 +1082,7 @@ struct Engine {
         if(rail.ready||time<rail.visibleUntil)railDraw(rail,time);
         for(const auto& gun:extraRails)if(gun.ready||time<gun.visibleUntil)railDraw(gun,time);
         if(dice.visible)diceDraw();
+        drawHoming(time);
         if(cross.ready) {
             COLORREF color=colorForFixed(cross.settings.palette);double power=.45+cross.charge()*.55;
             crossDraw(cross.x,cross.y,cross.settings.crossReach,color,power);
@@ -956,7 +1121,7 @@ struct Engine {
             const wchar_t* hint=armed.fire=="middle"?L"가운데 클릭 → 발사":armed.fire=="left"?L"클릭 → 발사":L"Space → 발사";
             SetTextColor(buffer,RGB(176,196,222));TextOutW(buffer,int(x+20),int(y+20),hint,lstrlenW(hint));
         }
-        for(const PadContact& c:padContacts){if(drawing)break;double x=padBounds.left+24+c.x*(padBounds.right-padBounds.left-48),y=padBounds.top+24+c.y*(padBounds.bottom-padBounds.top-48);COLORREF color=colorForFixed(padSettings.palette);
+        for(const PadContact& c:padContacts){if(drawing||padRail)break;double x=padBounds.left+24+c.x*(padBounds.right-padBounds.left-48),y=padBounds.top+24+c.y*(padBounds.bottom-padBounds.top-48);COLORREF color=colorForFixed(padSettings.palette);
             SelectObject(buffer,GetStockObject(NULL_BRUSH));SetDCPenColor(buffer,fadeColor(color,.55));Ellipse(buffer,int(x-12),int(y-12),int(x+12),int(y+12));SelectObject(buffer,GetStockObject(DC_BRUSH));star(x,y,8,color);star(x,y,3,RGB(255,255,255));
         }
         for(const Particle& p:particles) {
@@ -968,8 +1133,21 @@ struct Engine {
                 double angle=p.angle*.0174532925199,co=std::cos(angle),si=std::sin(angle),hw=p.size*std::max(.15,std::abs(co))*fade/2,hh=p.size*fade/2;
                 double xs[4]={-hw,hw,hw,-hw},ys[4]={-hh,-hh,hh,hh};POINT points[4];
                 for(int i=0;i<4;++i)points[i]={LONG(p.x+xs[i]*co-ys[i]*si),LONG(p.y+xs[i]*si+ys[i]*co)};
-                SetDCPenColor(buffer,p.color);SetDCBrushColor(buffer,p.color);Polygon(buffer,points,4);
-            } else { COLORREF color=fadeColor(p.color,fade);line(p.x-p.vx*.05,p.y-p.vy*.05,p.x,p.y,fadeColor(color,.33));star(p.x,p.y,p.size*fade,color); }
+                SetDCPenColor(buffer,p.color);SetDCBrushColor(buffer,p.color);Polygon(buffer,points,4);opacityPolygon(points,4);
+            } else {
+                COLORREF color=fadeColor(p.color,fade);
+                if(p.railStyle==1){star(p.x,p.y,p.size*fade,color);}
+                else if(p.railStyle==2){
+                    double speed=std::max(1.,std::hypot(p.vx,p.vy)),tail=std::min(65.,speed*.045);
+                    line(p.x-p.vx/speed*tail,p.y-p.vy/speed*tail,p.x,p.y,fadeColor(color,.55));
+                    star(p.x,p.y,p.size*fade,color);star(p.x,p.y,1,fadeColor(RGB(255,255,255),fade));
+                }else if(p.railStyle==3){
+                    double r=p.size*fade;line(p.x-r,p.y,p.x,p.y-r,color);line(p.x,p.y-r,p.x+r,p.y,color);
+                    line(p.x+r,p.y,p.x,p.y+r,color);line(p.x,p.y+r,p.x-r,p.y,color);
+                    line(p.x-p.vx*.035,p.y-p.vy*.035,p.x,p.y,fadeColor(color,.4));
+                    star(p.x,p.y,1.5,fadeColor(RGB(255,255,255),fade));
+                }else {line(p.x-p.vx*.05,p.y-p.vy*.05,p.x,p.y,fadeColor(color,.33));star(p.x,p.y,p.size*fade,color);}
+            }
         }
         if(blackHole.ready) {
             double x=blackHole.x,y=blackHole.y,r=blackHole.radius();COLORREF color=colorForFixed(blackHole.settings.palette);
@@ -993,9 +1171,14 @@ struct Engine {
         }
         SelectObject(buffer,GetStockObject(DC_BRUSH));
         if(time-cross.flashAt<.18) {double fade=1-(time-cross.flashAt)/.18;crossDraw(cross.x,cross.y,cross.settings.crossReach*(1+(1-fade)*.5),RGB(255,255,255),fade);}
-        BitBlt(target,ps.rcPaint.left,ps.rcPaint.top,ps.rcPaint.right-ps.rcPaint.left,ps.rcPaint.bottom-ps.rcPaint.top,buffer,ps.rcPaint.left,ps.rcPaint.top,SRCCOPY);
-        SelectClipRgn(buffer,NULL);EndPaint(window,&ps);
-        if(!firstPaint && (!particles.empty()||!clusters.empty()||isArmed||sling.ready||pendulum.ready||blackHole.ready||cross.ready||rail.ready||dice.visible||drawing)) { firstPaint=true;log("FirstPaint"); }
+        finalizeAlpha(&ps.rcPaint);
+        SelectClipRgn(buffer,NULL);SelectClipRgn(coverageDC,NULL);
+        POINT destination={left,top},origin={0,0};SIZE dimensions={width,height};
+        BLENDFUNCTION blend={AC_SRC_OVER,0,255,AC_SRC_ALPHA};
+        if(!UpdateLayeredWindow(window,NULL,&destination,&dimensions,buffer,&origin,0,&blend,ULW_ALPHA))
+            log("AlphaPresentError="+std::to_string(GetLastError()));
+        SelectClipRgn(buffer,NULL);
+        if(!firstPaint && (homingReady||!guidedShots.empty()||!particles.empty()||!clusters.empty()||isArmed||sling.ready||pendulum.ready||blackHole.ready||cross.ready||rail.ready||dice.visible||drawing)) { firstPaint=true;log("FirstPaint"); }
         if(!snapshotPath.empty()&&!snapshotSaved&&time-started>.35) {
             snapshotSaved=true;BITMAPINFO info={};info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);info.bmiHeader.biWidth=width;info.bmiHeader.biHeight=-height;info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;
             std::vector<BYTE> pixels(size_t(width)*height*4);HGDIOBJ selected=SelectObject(buffer,oldBitmap);HDC screen=GetDC(NULL);
@@ -1012,6 +1195,16 @@ static Engine* activeEngine = NULL;
 static LRESULT CALLBACK copilotHook(int code,WPARAM message,LPARAM payload) {
     if(code==HC_ACTION&&activeEngine&&!activeEngine->closing) {
         const KBDLLHOOKSTRUCT* key=reinterpret_cast<const KBDLLHOOKSTRUCT*>(payload);
+        if(key->vkCode==VK_F12){
+            bool up=message==WM_KEYUP||message==WM_SYSKEYUP;
+            if(up&&activeEngine->f12Captured){activeEngine->f12Captured=false;return 1;}
+            if(!up&&(activeEngine->railInputHeld||activeEngine->copilotHold.held)){
+                if(!activeEngine->f12Captured){activeEngine->f12Captured=true;
+                    if(activeEngine->window)PostMessageW(activeEngine->window,SettingsMessage,0,0);
+                    else activeEngine->settingsPending=true;}
+                return 1;
+            }
+        }
         if(key->vkCode==VK_F23&&(acceptTestInput?(key->flags&LLKHF_INJECTED)!=0:(key->flags&LLKHF_INJECTED)==0)) {
             bool up=message==WM_KEYUP||message==WM_SYSKEYUP;
             activeEngine->railInputHeld=!up;
@@ -1020,6 +1213,7 @@ static LRESULT CALLBACK copilotHook(int code,WPARAM message,LPARAM payload) {
                 CopilotEvent* event=new(std::nothrow) CopilotEvent{up,key->time,position};
                 if(event&&!PostMessageW(activeEngine->window,CopilotMessage,0,reinterpret_cast<LPARAM>(event)))delete event;
             } else activeEngine->startupEvents.push_back({up,key->time,position});
+            return 1; // Engine owns Copilot input; stop PowerToys launching on repeats.
         }
     }
     return CallNextHookEx(NULL,code,message,payload);
@@ -1047,6 +1241,7 @@ static LRESULT CALLBACK windowProc(HWND window,UINT message,WPARAM w,LPARAM l) {
     if(message==WM_NCCREATE) { auto create=reinterpret_cast<CREATESTRUCTW*>(l);engine=reinterpret_cast<Engine*>(create->lpCreateParams);SetWindowLongPtrW(window,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(engine));engine->window=window; }
     if(!engine)return DefWindowProcW(window,message,w,l);
     switch(message) {
+        case SettingsMessage:engine->requestSettings();return 0;
         case WM_INPUT:engine->padInput(l);return DefWindowProcW(window,message,w,l);
         case RailPlaceMessage:{POINT point={LONG(INT_PTR(w)),LONG(INT_PTR(l))};engine->placeRail(point);return 0;}
         case RailWheelMessage:engine->chargeRail(int(INT_PTR(w)));return 0;
@@ -1067,6 +1262,7 @@ static LRESULT CALLBACK windowProc(HWND window,UINT message,WPARAM w,LPARAM l) {
         case WM_ERASEBKGND:return 1;
         case WM_NCHITTEST:return HTTRANSPARENT;
         case WM_MOUSEACTIVATE:return MA_NOACTIVATE;
+        case WM_SETCURSOR:return TRUE; // Preserve the underlying application cursor.
         case WM_CLOSE:engine->finish("Close");return 0;
         case WM_DESTROY:PostQuitMessage(0);return 0;
     }
@@ -1074,6 +1270,45 @@ static LRESULT CALLBACK windowProc(HWND window,UINT message,WPARAM w,LPARAM l) {
 }
 static void require(bool condition,const char* why) { if(!condition)throw std::runtime_error(why); }
 static void selfTest() {
+    {Engine test;test.homingReady=true;test.homingHolding=true;test.homingX=500;test.homingY=500;
+        test.releaseHoming(900,500,0);require(test.guidedShots.size()==30,"Homing 10 groups of 3 shots");
+        for(const auto& m:test.guidedShots)require(m.vx<0,"Homing launches backwards");
+        test.stepHoming(.02,.02);require(test.guidedShots[0].x<500&&test.guidedShots[29].x==500,"Homing delayed groups");
+        for(int i=2;i<=1800;++i)test.stepHoming(i/240.,1./240.);
+        require(test.guidedShots.empty()&&test.explosions==30,"Homing returns and explodes all shots");
+        test.homingReady=true;test.homingHolding=true;test.releaseHoming(500,500,10);
+        require(std::isfinite(test.guidedShots[0].nx),"Homing same-position target is safe");
+        test.finish("SelfTest");require(test.guidedShots.empty()&&!test.homingReady,"Homing cleanup");}
+
+    {Engine test;Cluster c={};c.x=300;c.y=300;c.settings.clusterCount=40;c.railEnergy=10;
+        std::vector<Particle> low,high;test.railImpact(low,c,1,false);c.railEnergy=100;test.railImpact(high,c,1,false);
+        require(low.size()==40&&high.size()==40,"Rail impact honors particle count");
+        for(const Particle& p:low)require(p.railStyle==1&&std::hypot(p.vx,p.vy)<500,"Low charge compact star burst");
+        bool cores=false;for(const Particle& p:high){require(std::hypot(p.vx,p.vy)>=1080&&p.life>=1.95,"Full charge fast long-lived burst");cores|=p.railStyle==3;}
+        require(cores&&test.shocks.size()==1,"Full charge adds diamond sparks and shockwave");}
+
+    {Engine glow;glow.setupBuffer();glow.rail.x=250;glow.rail.y=250;
+        glow.railChargeGlow(glow.rail,1,1,RGB(100,180,255));glow.finalizeAlpha();
+        BYTE* outside=glow.bufferPixels+(size_t(192)*glow.width+350)*4;
+        require(outside[3]>0&&outside[3]<100,"Rail charging halo is translucent");
+        require(glow.coveragePixels[(size_t(192)*glow.width+350)*4]==0,"Charging halo has no opaque coverage");}
+
+    {Engine render;render.setupBuffer();render.rail.ready=true;render.rail.x=250;render.rail.y=250;
+        render.railDraw(render.rail,now());render.finalizeAlpha();
+        BYTE* body=render.bufferPixels+(size_t(250)*render.width+225)*4;
+        require(body[3]==255,"Dark rail body is opaque");
+        BYTE* empty=render.bufferPixels;require(empty[3]==0,"Empty background is transparent");
+        render.star(500,500,3,RGB(30,60,90));render.finalizeAlpha();
+        BYTE* glow=render.bufferPixels+(size_t(500)*render.width+500)*4;
+        require(glow[3]==90,"Dim light remains translucent");}
+
+    {Engine two;two.padRail=true;two.rail.ready=true;two.rail.holding=true;two.rail.settings.railCharge=10;two.extraRails.push_back(two.rail);
+    two.railPadInput({{1,.2,.2},{2,.6,.6}});require(two.rail.energy==0,"Two-finger landing does not charge");
+    two.railPadInput({{2,.635,.6},{1,.235,.2}});require(std::abs(two.rail.energy-10)<.1&&two.extraRails[0].energy==two.rail.energy,"Two-finger motion charges all railguns with reordered IDs");
+    double energy=two.rail.energy;two.railPadInput({{1,.235,.2},{2,.635,.6}});require(two.rail.energy==energy,"Stationary fingers do not charge");
+    two.railPadInput({{1,.4,.2}});two.railPadInput({{1,.8,.2},{2,.9,.6}});require(two.rail.energy==energy,"Finger count change does not jump charge");
+    two.rail.holding=false;two.railPadInput({{1,.9,.2},{2,1,.6}});require(two.rail.energy==energy,"Released railgun ignores touch charge");}
+
     {Engine draw;draw.padSettings.drawingSurface="white";draw.setupBuffer();draw.openBoard({0,0,1000,700});draw.padReady=true;
     draw.drawContacts({{0,.2,.2}});POINT firstInk=draw.inkLast;draw.drawContacts({{0,.8,.8}});
     require(draw.penDown&&GetPixel(draw.inkDC,firstInk.x,firstInk.y)==RGB(38,65,118),"Drawing ink persists on canvas");
@@ -1328,6 +1563,13 @@ static std::string base64(const std::wstring& text) {
     return out;
 }
 int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int) {
+    // Finish Windows launch feedback even on the already-running early-exit path.
+    // Posting first makes GetMessage nonblocking; no application window exists yet.
+    MSG startupMessage={};
+    PeekMessageW(&startupMessage,NULL,0,0,PM_NOREMOVE);
+    PostThreadMessageW(GetCurrentThreadId(),WM_NULL,0,0);
+    GetMessageW(&startupMessage,NULL,0,0);
+
     QueryPerformanceFrequency(&frequency);QueryPerformanceCounter(&epoch);
     HANDLE mutex=NULL;bool owner=false;
     try {
@@ -1375,11 +1617,13 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int) {
         engine.setupBuffer();WNDCLASSEXW wc={};wc.cbSize=sizeof(wc);wc.lpfnWndProc=windowProc;wc.hInstance=instance;wc.lpszClassName=windowClass.c_str();RegisterClassExW(&wc);
         HWND window=CreateWindowExW(WS_EX_LAYERED|WS_EX_TRANSPARENT|WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE|WS_EX_TOPMOST,windowClass.c_str(),L"이게 코파일럿보다 낫다 · 효과",WS_POPUP,engine.left,engine.top,engine.width,engine.height,NULL,NULL,instance,&engine);
         if(!window)throw std::runtime_error("Cannot create effect window");
-        SetLayeredWindowAttributes(window,RGB(0,0,0),255,LWA_COLORKEY);
+        log("Transparency=PerPixelAlpha");
         GetCursorPos(&engine.previousCursor);engine.leftDown=down(VK_LBUTTON);engine.middleDown=down(VK_MBUTTON);engine.spaceDown=down(VK_SPACE);engine.started=engine.previous=now();
         engine.trigger(settings,&bootCursor);
         for(const auto& event:engine.startupEvents){if(event.isWheel)engine.chargeRail(event.wheel);else engine.copilot(event.up,event.time,&event.position);}
         engine.startupEvents.clear();
+        if(engine.settingsPending||(!provided&&down(VK_F12))){engine.settingsPending=false;engine.f12Captured=true;engine.requestSettings();}
+        engine.paint(); // Present the first effect immediately, before entering the message loop.
         SetWindowPos(window,HWND_TOPMOST,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE|SWP_SHOWWINDOW);UpdateWindow(window);SetTimer(window,1,16,NULL);
         log("NativeHost Style="+std::to_string(GetWindowLongPtrW(window,GWL_EXSTYLE)));
         log(std::string("FocusPreserved=")+(GetForegroundWindow()==foreground?"true":"false")+" HitTestPassThrough="+(WindowFromPoint(testPoint)==underlying?"true":"false"));

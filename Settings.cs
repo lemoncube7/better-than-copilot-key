@@ -62,7 +62,7 @@ public sealed class EffectSettings
     public void Normalize()
     {
         if(DrawingSurface != "white") DrawingSurface = "screen";
-        if (Effect != "confetti" && Effect != "gravity" && Effect != "cluster" && Effect != "blackhole" && Effect != "pendulum" && Effect != "crossflash" && Effect != "railgun" && Effect != "dice" && Effect != "touchpad" && Effect != "drawing") Effect = "cluster";
+        if (Effect != "confetti" && Effect != "gravity" && Effect != "cluster" && Effect != "blackhole" && Effect != "pendulum" && Effect != "crossflash" && Effect != "railgun" && Effect != "dice" && Effect != "touchpad" && Effect != "drawing" && Effect != "homing") Effect = "cluster";
         DiceSize = Clamp(DiceSize <= 0 ? 76 : DiceSize, 40, 140, 76);
         DiceSensitivity = Clamp(DiceSensitivity <= 0 ? 1 : DiceSensitivity, .3, 3, 1);
         DiceStopDelay = Clamp(DiceStopDelay <= 0 ? .18 : DiceStopDelay, .08, .6, .18);
